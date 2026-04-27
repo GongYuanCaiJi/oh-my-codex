@@ -199,6 +199,49 @@ describe('planning artifacts', () => {
     );
   });
 
+  it('ignores malformed unrelated context drafts when a valid approved pack exists', async () => {
+    const plansDir = join(tempDir, '.omx', 'plans');
+    const contextDir = join(tempDir, '.omx', 'context');
+    await mkdir(plansDir, { recursive: true });
+    await mkdir(contextDir, { recursive: true });
+    const prdPath = join(plansDir, 'prd-issue-1970.md');
+    const testSpecPath = join(plansDir, 'test-spec-issue-1970.md');
+    await writeFile(prdPath, '# PRD\n\nLaunch via omx ralph "Execute issue 1970"\n');
+    await writeFile(testSpecPath, '# Test Spec\n');
+
+    const draft = createContextPackDraft(tempDir, [
+      { path: 'src/planning/artifacts.ts', roles: ['build'] },
+    ], { slug: 'issue-1970' });
+    assert.ok(draft);
+    await writeFile(join(contextDir, 'context-issue-1970.json'), JSON.stringify(draft, null, 2));
+    await writeFile(join(contextDir, 'zz-unrelated-draft.json'), '{ not valid json');
+
+    const hint = readApprovedExecutionLaunchHint(tempDir, 'ralph');
+    assert.ok(hint);
+    const result = readApprovedContextPack(tempDir, hint);
+    assert.equal(result.status, 'valid');
+    assert.equal(result.status === 'valid' ? result.contextPack.pack.slug : null, 'issue-1970');
+  });
+
+  it('ignores malformed unrelated context drafts when no pack matches the approved basis', async () => {
+    const plansDir = join(tempDir, '.omx', 'plans');
+    const contextDir = join(tempDir, '.omx', 'context');
+    await mkdir(plansDir, { recursive: true });
+    await mkdir(contextDir, { recursive: true });
+    await writeFile(
+      join(plansDir, 'prd-issue-1970.md'),
+      '# PRD\n\nLaunch via omx ralph "Execute issue 1970"\n',
+    );
+    await writeFile(join(plansDir, 'test-spec-issue-1970.md'), '# Test Spec\n');
+    await writeFile(join(contextDir, 'zz-unrelated-draft.json'), '{ not valid json');
+
+    const hint = readApprovedExecutionLaunchHint(tempDir, 'ralph');
+    assert.ok(hint);
+    const result = readApprovedContextPack(tempDir, hint);
+    assert.equal(result.status, 'missing');
+    assert.match(result.status === 'missing' ? result.reason : '', /no context pack matches/);
+  });
+
   it('rejects context packs with stale approved PRD basis hashes', async () => {
     const plansDir = join(tempDir, '.omx', 'plans');
     const contextDir = join(tempDir, '.omx', 'context');

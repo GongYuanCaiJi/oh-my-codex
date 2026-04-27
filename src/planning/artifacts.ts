@@ -348,12 +348,33 @@ function validateBasisFreshness(cwd: string, actual: ContextPackBasis, expected:
   return errors;
 }
 
-function readContextPackJson(path: string): { pack: ContextPackArtifact | null; errors: string[] } {
+function readContextPackJson(path: string): { pack: ContextPackArtifact | null; errors: string[]; value?: unknown } {
   try {
-    return validateContextPackShape(JSON.parse(readFileSync(path, 'utf-8')) as unknown);
+    const value = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+    return { ...validateContextPackShape(value), value };
   } catch (error) {
     return { pack: null, errors: [`invalid JSON: ${error instanceof Error ? error.message : String(error)}`] };
   }
+}
+
+function contextPackFileCouldMatchApprovedSlug(path: string, approvedSlug: string | null): boolean {
+  if (!approvedSlug) return true;
+  return basename(path, '.json').toLowerCase().includes(approvedSlug.toLowerCase());
+}
+
+function rawBasisPathsMatch(cwd: string, value: unknown, expected: ContextPackBasis): boolean {
+  if (!isRecord(value) || !isRecord(value.basis)) return false;
+  const prd = value.basis.prd;
+  if (!isRecord(prd) || typeof prd.path !== 'string') return false;
+  if (resolveRepoPath(cwd, prd.path) !== resolveRepoPath(cwd, expected.prd.path)) return false;
+
+  const testSpecs = value.basis.testSpecs;
+  if (!Array.isArray(testSpecs) || testSpecs.length !== expected.testSpecs.length) return false;
+  return testSpecs.every((spec, index) => (
+    isRecord(spec)
+    && typeof spec.path === 'string'
+    && resolveRepoPath(cwd, spec.path) === resolveRepoPath(cwd, expected.testSpecs[index]?.path ?? '')
+  ));
 }
 
 export function readApprovedContextPack(cwd: string, approvedContext: ApprovedPlanContext): ContextPackReadResult {
@@ -377,9 +398,18 @@ export function readApprovedContextPack(cwd: string, approvedContext: ApprovedPl
     return { status: 'missing', reason: '.omx/context is not readable' };
   }
 
+  const approvedSlug = artifactSlug(approvedContext.sourcePath, /^prd-(?<slug>.*)\.md$/i);
   for (const path of files) {
-    const { pack, errors } = readContextPackJson(path);
-    if (!pack) return { status: 'malformed', path, errors };
+    const { pack, errors, value } = readContextPackJson(path);
+    if (!pack) {
+      if (
+        rawBasisPathsMatch(cwd, value, expectedBasis)
+        || contextPackFileCouldMatchApprovedSlug(path, approvedSlug)
+      ) {
+        return { status: 'malformed', path, errors };
+      }
+      continue;
+    }
     if (!basisPathsMatch(cwd, pack.basis, expectedBasis)) continue;
     const staleErrors = validateBasisFreshness(cwd, pack.basis, expectedBasis);
     if (staleErrors.length > 0) return { status: 'stale', path, errors: staleErrors, expectedBasis };
