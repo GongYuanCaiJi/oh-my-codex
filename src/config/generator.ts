@@ -27,6 +27,7 @@ interface MergeOptions {
   sharedMcpRegistrySource?: string;
   verbose?: boolean;
   statusLinePreset?: HudPreset;
+  forceStatusLinePreset?: boolean;
 }
 
 function escapeTomlString(value: string): string {
@@ -795,6 +796,7 @@ function extractCustomizedTuiSectionsFromOmxBlocks(config: string): string[] {
 function upsertTuiStatusLine(
   config: string,
   preset: HudPreset = DEFAULT_STATUS_LINE_PRESET,
+  options: { forceStatusLinePreset?: boolean } = {},
 ): {
   cleaned: string;
   hadExistingTui: boolean;
@@ -825,13 +827,22 @@ function upsertTuiStatusLine(
   let preservedStatusLine: string | undefined;
 
   for (const section of sections) {
+    let lastNonBlankBeforeStatusLine: string | undefined;
+
     for (let i = section.start + 1; i < section.end; i++) {
       const line = lines[i];
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
+      if (!trimmed) continue;
+      if (trimmed.startsWith("#")) {
+        lastNonBlankBeforeStatusLine = trimmed;
+        continue;
+      }
 
       const keyMatch = trimmed.match(/^([A-Za-z0-9_-]+)\s*=/);
-      if (!keyMatch) continue;
+      if (!keyMatch) {
+        lastNonBlankBeforeStatusLine = trimmed;
+        continue;
+      }
 
       const key = keyMatch[1];
       if (key === "status_line") {
@@ -843,12 +854,29 @@ function upsertTuiStatusLine(
           i += 1;
           entryLines.push(lines[i].trim());
         }
-        preservedStatusLine ??= entryLines.join("\n");
+        const statusLineEntry = entryLines.join("\n");
+        const hasMarker =
+          lastNonBlankBeforeStatusLine === OMX_MANAGED_STATUS_LINE_MARKER;
+        const isManagedByMarker =
+          hasMarker && OMX_PRESET_STATUS_LINE_VALUES.has(statusLineEntry);
+        const isManagedByLegacyValue =
+          !hasMarker && statusLineEntry === LEGACY_OMX_STATUS_LINE;
+        const isOmxManagedStatusLine =
+          isManagedByMarker || isManagedByLegacyValue;
+
+        if (!options.forceStatusLinePreset || !isOmxManagedStatusLine) {
+          preservedStatusLine ??= statusLineEntry;
+        }
+        lastNonBlankBeforeStatusLine = statusLineEntry;
         continue;
       }
-      if (seenKeys.has(key)) continue;
+      if (seenKeys.has(key)) {
+        lastNonBlankBeforeStatusLine = trimmed;
+        continue;
+      }
       seenKeys.add(key);
       preservedKeyLines.push(trimmed);
+      lastNonBlankBeforeStatusLine = trimmed;
     }
   }
 
@@ -1250,7 +1278,9 @@ export function buildMergedConfig(
   existing = upsertEnvSettings(existing);
   existing = upsertAgentsSettings(existing);
   const tuiUpsert = includeTui
-    ? upsertTuiStatusLine(existing, statusLinePreset)
+    ? upsertTuiStatusLine(existing, statusLinePreset, {
+        forceStatusLinePreset: options.forceStatusLinePreset,
+      })
     : { cleaned: existing, hadExistingTui: false };
   existing = tuiUpsert.cleaned;
 
