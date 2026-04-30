@@ -2038,7 +2038,7 @@ describe('teamCommand await', () => {
     await writeFile(
       fakeCodexPath,
       `#!/usr/bin/env node
-setTimeout(() => process.exit(0), 150);
+setTimeout(() => process.exit(0), 0);
 process.stdin.resume();
 process.on('SIGTERM', () => process.exit(0));
 `,

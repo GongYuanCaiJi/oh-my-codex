@@ -1637,6 +1637,38 @@ async function recordRecoverableStartupIssue(params: {
   ).catch(() => {});
 }
 
+async function recordPromptStartupWorkerStopped(params: {
+  teamName: string;
+  workerName: string;
+  taskIds: string[];
+  reason: string;
+  cwd: string;
+}): Promise<void> {
+  const { teamName, workerName, taskIds, reason, cwd } = params;
+  const updatedAt = new Date().toISOString();
+  await writeWorkerStatus(
+    teamName,
+    workerName,
+    {
+      state: 'failed',
+      current_task_id: taskIds[0],
+      reason,
+      updated_at: updatedAt,
+    },
+    cwd,
+  ).catch(() => {});
+  await appendTeamEvent(
+    teamName,
+    {
+      type: 'worker_stopped',
+      worker: workerName,
+      task_id: taskIds[0],
+      reason,
+    },
+    cwd,
+  ).catch(() => {});
+}
+
 function setTeamModelInstructionsFile(teamName: string, filePath: string): void {
   if (!previousModelInstructionsFileByTeam.has(teamName)) {
     previousModelInstructionsFileByTeam.set(teamName, process.env[MODEL_INSTRUCTIONS_FILE_ENV]);
@@ -2676,6 +2708,16 @@ export async function startTeam(
           && isRecoverableInteractiveStartupReason(dispatchOutcome.reason)
         ) {
           await recordRecoverableStartupIssue({
+            teamName: sanitized,
+            workerName,
+            taskIds: workerTasks.map((task) => task.id),
+            reason: dispatchOutcome.reason,
+            cwd: leaderCwd,
+          });
+          return { ok: true, workerIndex, workerName };
+        }
+        if (workerLaunchMode === 'prompt' && !workerAlive) {
+          await recordPromptStartupWorkerStopped({
             teamName: sanitized,
             workerName,
             taskIds: workerTasks.map((task) => task.id),
