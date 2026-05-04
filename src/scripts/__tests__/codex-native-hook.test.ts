@@ -7906,7 +7906,8 @@ exit 0
         {
           hook_event_name: "Stop",
           cwd,
-          turn_id: "turn-stop-auto-mode-1",
+          thread_id: "thread-stop-auto-env-session",
+          turn_id: "turn-stop-auto-env-session-1",
           last_assistant_message: "Keep going and finish the cleanup.",
         },
         { cwd },
