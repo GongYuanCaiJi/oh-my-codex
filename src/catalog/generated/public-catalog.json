@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-05-04T12:26:48.621Z",
+  "generatedAt": "2026-05-04T12:28:00.013Z",
   "version": "2026.02.28.1",
   "counts": {
-    "skillCount": 44,
+    "skillCount": 45,
     "promptCount": 30,
-    "activeSkillCount": 29,
+    "activeSkillCount": 30,
     "activeAgentCount": 18
   },
   "coreSkills": [
@@ -67,6 +67,13 @@
     },
     {
       "name": "autoresearch-goal",
+      "category": "execution",
+      "status": "active",
+      "core": false,
+      "internalRequired": false
+    },
+    {
+      "name": "performance-goal",
       "category": "execution",
       "status": "active",
       "core": false,
