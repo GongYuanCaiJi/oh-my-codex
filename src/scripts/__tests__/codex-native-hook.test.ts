@@ -7862,12 +7862,11 @@ exit 0
     }
   });
 
-  it("suppresses native auto-nudge when root deep-interview mode state is active without an explicit session", async () => {
+  it("suppresses native auto-nudge when root deep-interview mode state is active and no session is known", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-auto-nudge-deep-interview-mode-"));
     try {
       const stateDir = join(cwd, ".omx", "state");
       await mkdir(stateDir, { recursive: true });
-      process.env.OMX_SESSION_ID = "sess-stop-auto-mode";
       await writeJson(join(stateDir, "deep-interview-state.json"), {
         active: true,
         mode: "deep-interview",
@@ -7886,6 +7885,41 @@ exit 0
 
       assert.equal(result.omxEventName, "stop");
       assert.equal(result.outputJson, null);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("treats inherited OMX_SESSION_ID as session-aware for native auto-nudge Stop checks", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-auto-nudge-env-session-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      await mkdir(stateDir, { recursive: true });
+      process.env.OMX_SESSION_ID = "sess-stop-auto-mode";
+      await writeJson(join(stateDir, "deep-interview-state.json"), {
+        active: true,
+        mode: "deep-interview",
+        current_phase: "intent-first",
+      });
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          turn_id: "turn-stop-auto-mode-1",
+          last_assistant_message: "Keep going and finish the cleanup.",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.deepEqual(result.outputJson, {
+        decision: "block",
+        reason: DEFAULT_AUTO_NUDGE_RESPONSE,
+        stopReason: "auto_nudge",
+        systemMessage:
+          "OMX native Stop detected a stall/permission-style handoff and continued the turn automatically.",
+      });
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

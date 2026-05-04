@@ -2677,9 +2677,10 @@ export async function dispatchCodexNativeHook(
   }
 
   if (hookEventName === "Stop") {
+    const inheritedSessionId = safeString(process.env.OMX_SESSION_ID || process.env.CODEX_SESSION_ID || process.env.SESSION_ID).trim();
     const stopCanonicalSessionId = await resolveInternalSessionIdForPayload(
       cwd,
-      readPayloadSessionId(payload),
+      readPayloadSessionId(payload) || inheritedSessionId,
     );
     if (stopCanonicalSessionId) {
       canonicalSessionId = stopCanonicalSessionId;
