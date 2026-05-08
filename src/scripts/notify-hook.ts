@@ -89,6 +89,14 @@ async function isOmxManagedCwd(cwd: string): Promise<boolean> {
   if (trustedInternalCwd && sameFilePath(trustedInternalCwd, cwd)) return true;
   if (existsSync(join(cwd, '.omx', 'setup-scope.json'))) return true;
   if (existsSync(join(cwd, '.omx', 'managed'))) return true;
+  // Runtime-created OMX state/log directories are faithful ownership markers
+  // for existing session/team fixtures even when the older fixtures do not
+  // carry setup-scope.json, .omx/managed, or a fully-populated session.json.
+  // Keep the guard narrow: a plain project without an OMX runtime artifact still
+  // exits before creating .omx, while existing .omx state/log roots continue to
+  // receive hook updates.
+  if (existsSync(join(cwd, '.omx', 'state'))) return true;
+  if (existsSync(join(cwd, '.omx', 'logs'))) return true;
   const sessionStatePath = join(cwd, '.omx', 'state', 'session.json');
   if (existsSync(sessionStatePath)) {
     try {
@@ -104,6 +112,9 @@ async function isOmxManagedCwd(cwd: string): Promise<boolean> {
     if (teamName && workerName) {
       const candidateStateRoots = [
         safeString(process.env.OMX_TEAM_STATE_ROOT || '').trim(),
+        safeString(process.env.OMX_TEAM_LEADER_CWD || '').trim()
+          ? join(resolve(cwd, safeString(process.env.OMX_TEAM_LEADER_CWD || '').trim()), '.omx', 'state')
+          : '',
         join(cwd, '.omx', 'state'),
       ].filter((value, index, values) => value && values.indexOf(value) === index);
       for (const candidateStateRoot of candidateStateRoots) {
@@ -123,6 +134,15 @@ async function isOmxManagedCwd(cwd: string): Promise<boolean> {
         } catch {
           return false;
         }
+      }
+      // A worker notify hook with an explicit runtime root hint is OMX-scoped
+      // even when the hint fails validation. Let the main worker path log the
+      // unresolved-root warning and fail closed without inventing local state.
+      if (
+        safeString(process.env.OMX_TEAM_STATE_ROOT || '').trim()
+        || safeString(process.env.OMX_TEAM_LEADER_CWD || '').trim()
+      ) {
+        return true;
       }
     }
   }
