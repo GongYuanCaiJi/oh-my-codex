@@ -7443,6 +7443,35 @@ describe("codex native hook triage integration", () => {
     }
   });
 
+  it("suppresses duplicate UserPromptSubmit context for the same native turn", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-triage-duplicate-turn-"));
+    try {
+      await mkdir(join(cwd, ".omx", "state"), { recursive: true });
+      const payload = {
+        hook_event_name: "UserPromptSubmit",
+        cwd,
+        session_id: "triage-duplicate-1",
+        thread_id: "thread-triage-duplicate-1",
+        turn_id: "turn-triage-duplicate-1",
+        prompt: "add dark mode toggle to the settings page",
+      };
+
+      const first = await dispatchCodexNativeHook(payload, { cwd });
+      const second = await dispatchCodexNativeHook(payload, { cwd });
+
+      const firstContext = String(
+        (first.outputJson as { hookSpecificOutput?: { additionalContext?: string } })?.hookSpecificOutput?.additionalContext ?? "",
+      );
+      assert.match(firstContext, /multi-step goal with no workflow keyword/);
+      assert.equal(second.outputJson, null);
+
+      const stateFile = join(cwd, ".omx", "state", "sessions", "triage-duplicate-1", "prompt-routing-state.json");
+      assert.equal(existsSync(stateFile), true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   // ── Group 3: LIGHT/explore ────────────────────────────────────────────────
 
   it("injects LIGHT/explore advisory and writes state for a question-shaped prompt", async () => {

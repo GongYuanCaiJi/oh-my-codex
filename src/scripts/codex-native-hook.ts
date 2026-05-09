@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process";
-import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync } from "fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync } from "fs";
 import { mkdir, readFile, readdir, writeFile } from "fs/promises";
 import { join, relative, resolve } from "path";
 import { pathToFileURL } from "url";
@@ -131,6 +131,54 @@ const SHORT_FOLLOWUP_PRIORITY_PATTERNS = [
   /(?:按照|按|基于)(?:这个|上述|当前)?(?:plan|计划|方案)/u,
   /\b(?:follow up|latest request|this turn|current turn|newest request)\b/i,
 ] as const;
+
+function safeDedupeKeyPart(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "unknown";
+}
+
+function tryClaimNativeContextHookInvocation(input: {
+  stateDir: string;
+  hookEventName: CodexHookEventName | null;
+  nativeSessionId: string;
+  threadId: string;
+  turnId: string;
+  prompt: string;
+}): boolean {
+  const { stateDir, hookEventName, nativeSessionId, threadId, turnId, prompt } = input;
+  if (hookEventName !== "SessionStart" && hookEventName !== "UserPromptSubmit") return true;
+
+  const sessionKey = nativeSessionId.trim();
+  if (!sessionKey) return true;
+
+  let eventKey = "";
+  if (hookEventName === "SessionStart") {
+    eventKey = "session-start";
+  } else if (turnId.trim()) {
+    eventKey = `prompt-${threadId.trim() || "thread"}-${turnId.trim()}`;
+  } else {
+    // Without Codex's turn id, repeated identical text in the same session may
+    // be a legitimate later prompt. Do not dedupe that ambiguous case.
+    return true;
+  }
+
+  const promptKey = hookEventName === "UserPromptSubmit"
+    ? `-${promptSignature(prompt.trim().toLowerCase())}`
+    : "";
+  const claimDir = join(stateDir, "native-hook-claims");
+  const claimPath = join(
+    claimDir,
+    `${safeDedupeKeyPart(hookEventName)}-${safeDedupeKeyPart(sessionKey)}-${safeDedupeKeyPart(eventKey)}${promptKey}.json`,
+  );
+
+  try {
+    mkdirSync(claimDir, { recursive: true });
+    const fd = openSync(claimPath, "wx");
+    closeSync(fd);
+    return true;
+  } catch {
+    return false;
+  }
+}
 const MAX_SESSION_META_LINE_BYTES = 256 * 1024;
 
 function safeString(value: unknown): string {
@@ -2202,6 +2250,22 @@ export async function dispatchCodexNativeHook(
   const nativeSessionId = safeString(payload.session_id ?? payload.sessionId).trim();
   const threadId = safeString(payload.thread_id ?? payload.threadId).trim();
   const turnId = safeString(payload.turn_id ?? payload.turnId).trim();
+  const submittedPrompt = hookEventName === "UserPromptSubmit" ? readPromptText(payload) : "";
+  if (!tryClaimNativeContextHookInvocation({
+    stateDir,
+    hookEventName,
+    nativeSessionId,
+    threadId,
+    turnId,
+    prompt: submittedPrompt,
+  })) {
+    return {
+      hookEventName,
+      omxEventName,
+      skillState,
+      outputJson: null,
+    };
+  }
   const currentSessionState = await readUsableSessionState(cwd);
   let canonicalSessionId = safeString(currentSessionState?.session_id).trim();
   let resolvedNativeSessionId = nativeSessionId;
@@ -2268,7 +2332,7 @@ export async function dispatchCodexNativeHook(
   let outputJson: Record<string, unknown> | null = null;
 
   if (hookEventName === "UserPromptSubmit") {
-    const prompt = readPromptText(payload);
+    const prompt = submittedPrompt;
     if (prompt) {
       skillState = buildNativeOutsideTmuxTeamPromptBlockState(
         prompt,

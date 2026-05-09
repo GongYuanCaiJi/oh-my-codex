@@ -137,6 +137,8 @@ operator to clear incompatible state explicitly via `omx state ...` or the
 
 `UserPromptSubmit` can now emit triage advisory context alongside keyword context. When no keyword matches, the triage layer classifies the prompt and may inject an advisory prompt-routing context string — this is advisory prompt-routing context that does not activate a skill or workflow by itself; it adds a developer-context hint the model may follow. Light advisory destinations include repo-local `explore`, narrow-edit `executor`, visual `designer`, and external documentation/reference `researcher`; researcher routing is for official-doc, version-compatibility, source-backed, or external lookup requests, does not override local anchors or implementation-shaped prompts, and still writes only prompt-routing state. Keywords remain the deterministic control surface: a matched keyword always takes precedence over triage output, and users can suppress triage injection per prompt with phrases such as `no workflow`, `just chat`, or `plain answer`.
 
+The native hook also keeps an atomic per-turn context claim under `.omx/state/native-hook-claims/` for context-emitting `SessionStart` and `UserPromptSubmit` events. If Codex loads the same managed hook through more than one hook source, the first invocation owns the context emission and duplicate invocations for the same native session/turn return no additional context.
+
 ## Verification guidance
 
 When validating hooks, keep the proof boundary explicit:
