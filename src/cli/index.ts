@@ -16,6 +16,7 @@ import { hooksCommand } from "./hooks.js";
 import { hudCommand } from "../hud/index.js";
 import { sidecarCommand } from "../sidecar/index.js";
 import { teamCommand } from "./team.js";
+import { runingTeamCommand } from "./runingteam.js";
 import { ralphCommand } from "./ralph.js";
 import { askCommand } from "./ask.js";
 import { questionCommand } from "./question.js";
@@ -183,6 +184,7 @@ Usage:
   omx deepinit [path]
                 Alias for agents-init (lightweight AGENTS bootstrap only)
   omx team      Spawn parallel worker panes in tmux and bootstrap inbox/task state
+  omx runingteam First-class dynamic planning + team orchestration controller
   omx ralph     Launch Codex with ralph persistence mode active
   omx autoresearch [DEPRECATED] Use $autoresearch; direct CLI launch removed
   omx version   Show version information
@@ -318,6 +320,7 @@ type CliCommand =
   | "explore"
   | "sparkshell"
   | "team"
+  | "runingteam"
   | "session"
   | "resume"
   | "version"
@@ -356,6 +359,7 @@ const NESTED_HELP_COMMANDS = new Set<CliCommand>([
   "session",
   "sparkshell",
   "team",
+  "runingteam",
   "tmux-hook",
 ]);
 
@@ -923,6 +927,7 @@ export async function main(args: string[]): Promise<void> {
     "explore",
     "sparkshell",
     "team",
+    "runingteam",
     "ralph",
     "session",
     "resume",
@@ -1032,6 +1037,9 @@ export async function main(args: string[]): Promise<void> {
         break;
       case "team":
         await teamCommand(args.slice(1), options);
+        break;
+      case "runingteam":
+        await runingTeamCommand(args.slice(1));
         break;
       case "session":
         await sessionCommand(args.slice(1));
