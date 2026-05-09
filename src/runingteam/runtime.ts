@@ -239,15 +239,31 @@ export async function updateRuningTeamSession(cwd: string, sessionId: string, up
   return next;
 }
 
+export async function assertRuningTeamCompletionReady(cwd: string, sessionId: string): Promise<void> {
+  const paths = runingTeamPaths(cwd, sessionId);
+  if (!existsSync(paths.finalSynthesis)) {
+    throw new Error('complete_requires_final_synthesis');
+  }
+  const session = await readRuningTeamSession(cwd, sessionId);
+  const verdictPath = paths.verdictJson(session.iteration);
+  if (!existsSync(verdictPath)) {
+    throw new Error('complete_requires_final_synthesis_ready_verdict');
+  }
+  const verdict = validateCriticVerdictRecord(await readJson<unknown>(verdictPath));
+  if (verdict.verdict !== 'FINAL_SYNTHESIS_READY') {
+    throw new Error('complete_requires_final_synthesis_ready_verdict');
+  }
+}
+
 export async function transitionRuningTeamSession(cwd: string, sessionId: string, to: RuningTeamStatus): Promise<RuningTeamSession> {
   const current = await readRuningTeamSession(cwd, sessionId);
   if (RUNINGTEAM_TERMINAL_STATUSES.has(current.status) && current.status !== to) {
     throw new Error('terminal_states_require_explicit_recovery');
   }
-  if (to === 'complete' && !existsSync(runingTeamPaths(cwd, sessionId).finalSynthesis)) {
-    throw new Error('complete_requires_final_synthesis');
+  if (to === 'complete') {
+    await assertRuningTeamCompletionReady(cwd, sessionId);
   }
-  return await updateRuningTeamSession(cwd, sessionId, { status: to, terminal_reason: to === 'complete' ? 'final synthesis present' : current.terminal_reason });
+  return await updateRuningTeamSession(cwd, sessionId, { status: to, terminal_reason: to === 'complete' ? 'final synthesis ready' : current.terminal_reason });
 }
 
 export async function writeFinalSynthesis(cwd: string, sessionId: string, content: string): Promise<string> {

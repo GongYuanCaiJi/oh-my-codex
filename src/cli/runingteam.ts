@@ -7,6 +7,7 @@ import {
   listRuningTeamSessions,
   readRuningTeamSession,
   runingTeamPaths,
+  assertRuningTeamCompletionReady,
   transitionRuningTeamSession,
   updateRuningTeamSession,
   writeFinalSynthesis,
@@ -83,8 +84,17 @@ export async function runingTeamCommand(args: string[], cwd = process.cwd()): Pr
   if (subcommand === 'finalize') {
     const sessionId = requireSession(args.slice(1));
     const paths = runingTeamPaths(cwd, sessionId);
-    if (!existsSync(paths.finalSynthesis)) {
-      throw new Error('RuningTeam cannot complete without final-synthesis.md');
+    try {
+      await assertRuningTeamCompletionReady(cwd, sessionId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'complete_requires_final_synthesis') {
+        throw new Error('RuningTeam cannot complete without final-synthesis.md');
+      }
+      if (message === 'complete_requires_final_synthesis_ready_verdict') {
+        throw new Error('RuningTeam cannot complete without FINAL_SYNTHESIS_READY verdict evidence');
+      }
+      throw err;
     }
     await transitionRuningTeamSession(cwd, sessionId, 'complete');
     const synthesis = await readFile(paths.finalSynthesis, 'utf-8');

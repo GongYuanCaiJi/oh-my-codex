@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runingTeamCommand } from '../runingteam.js';
-import { writeFinalSynthesis } from '../../runingteam/runtime.js';
+import { writeCriticVerdict, writeFinalSynthesis } from '../../runingteam/runtime.js';
 
 async function captureRuningTeam(args: string[], cwd: string): Promise<string[]> {
   const logs: string[] = [];
@@ -42,6 +42,13 @@ describe('runingteam CLI', () => {
       assert.ok(sessionId);
       await assert.rejects(captureRuningTeam(['finalize', sessionId], cwd), /final-synthesis\.md/);
       await writeFinalSynthesis(cwd, sessionId, '# Final synthesis\n\nReady.');
+      await assert.rejects(captureRuningTeam(['finalize', sessionId], cwd), /FINAL_SYNTHESIS_READY/);
+      await writeCriticVerdict(cwd, sessionId, {
+        iteration: 0,
+        verdict: 'FINAL_SYNTHESIS_READY',
+        acceptance_criteria_evidence: { ready: ['final synthesis'] },
+        created_at: new Date().toISOString(),
+      });
       const finalized = await captureRuningTeam(['finalize', sessionId], cwd);
       assert.match(finalized.join('\n'), /RuningTeam complete/);
     } finally {

@@ -48,6 +48,16 @@ describe('RuningTeam runtime contracts', () => {
       );
 
       await writeFinalSynthesis(cwd, session.session_id, '# Final synthesis\n\nAll evidence is supported.');
+      await assert.rejects(
+        transitionRuningTeamSession(cwd, session.session_id, 'complete'),
+        /complete_requires_final_synthesis_ready_verdict/,
+      );
+      await writeCriticVerdict(cwd, session.session_id, {
+        iteration: 0,
+        verdict: 'FINAL_SYNTHESIS_READY',
+        acceptance_criteria_evidence: { 'final synthesis is created before completion': ['manual synthesis'] },
+        created_at: new Date().toISOString(),
+      });
       const complete = await transitionRuningTeamSession(cwd, session.session_id, 'complete');
       assert.equal(complete.status, 'complete');
     });
