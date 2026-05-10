@@ -433,7 +433,7 @@ function upsertFeatureFlags(config: string): string {
       "[features]",
       "multi_agent = true",
       "child_agents_md = true",
-      "codex_hooks = true",
+      "hooks = true",
       "",
     ].join("\n");
     if (base.length === 0) {
@@ -460,14 +460,17 @@ function upsertFeatureFlags(config: string): string {
 
   let multiAgentIdx = -1;
   let childAgentsIdx = -1;
-  let codexHooksIdx = -1;
+  let hooksIdx = -1;
+  const deprecatedCodexHooksIndices: number[] = [];
   for (let i = featuresStart + 1; i < sectionEnd; i++) {
     if (/^\s*multi_agent\s*=/.test(lines[i])) {
       multiAgentIdx = i;
     } else if (/^\s*child_agents_md\s*=/.test(lines[i])) {
       childAgentsIdx = i;
+    } else if (/^\s*hooks\s*=/.test(lines[i])) {
+      hooksIdx = i;
     } else if (/^\s*codex_hooks\s*=/.test(lines[i])) {
-      codexHooksIdx = i;
+      deprecatedCodexHooksIndices.push(i);
     }
   }
 
@@ -485,16 +488,21 @@ function upsertFeatureFlags(config: string): string {
     sectionEnd += 1;
   }
 
-  if (codexHooksIdx >= 0) {
-    lines[codexHooksIdx] = "codex_hooks = true";
+  for (const index of deprecatedCodexHooksIndices.reverse()) {
+    lines.splice(index, 1);
+    if (index < sectionEnd) sectionEnd -= 1;
+  }
+
+  if (hooksIdx >= 0) {
+    lines[hooksIdx] = "hooks = true";
   } else {
-    lines.splice(sectionEnd, 0, "codex_hooks = true");
+    lines.splice(sectionEnd, 0, "hooks = true");
   }
 
   return lines.join("\n");
 }
 
-export function upsertCodexHooksFeatureFlag(config: string): string {
+export function upsertHooksFeatureFlag(config: string): string {
   const lines = config.split(/\r?\n/);
   const featuresStart = lines.findIndex((line) =>
     /^\s*\[features\]\s*$/.test(line),
@@ -502,7 +510,7 @@ export function upsertCodexHooksFeatureFlag(config: string): string {
 
   if (featuresStart < 0) {
     const base = config.trimEnd();
-    const featureBlock = ["[features]", "codex_hooks = true", ""].join("\n");
+    const featureBlock = ["[features]", "hooks = true", ""].join("\n");
     if (base.length === 0) {
       return featureBlock;
     }
@@ -517,18 +525,25 @@ export function upsertCodexHooksFeatureFlag(config: string): string {
     }
   }
 
-  let codexHooksIdx = -1;
+  let hooksIdx = -1;
+  const deprecatedCodexHooksIndices: number[] = [];
   for (let i = featuresStart + 1; i < sectionEnd; i++) {
-    if (/^\s*codex_hooks\s*=/.test(lines[i])) {
-      codexHooksIdx = i;
-      break;
+    if (/^\s*hooks\s*=/.test(lines[i])) {
+      hooksIdx = i;
+    } else if (/^\s*codex_hooks\s*=/.test(lines[i])) {
+      deprecatedCodexHooksIndices.push(i);
     }
   }
 
-  if (codexHooksIdx >= 0) {
-    lines[codexHooksIdx] = "codex_hooks = true";
+  for (const index of deprecatedCodexHooksIndices.reverse()) {
+    lines.splice(index, 1);
+    if (index < sectionEnd) sectionEnd -= 1;
+  }
+
+  if (hooksIdx >= 0) {
+    lines[hooksIdx] = "hooks = true";
   } else {
-    lines.splice(sectionEnd, 0, "codex_hooks = true");
+    lines.splice(sectionEnd, 0, "hooks = true");
   }
 
   return lines.join("\n");
@@ -781,7 +796,7 @@ export function stripOmxFeatureFlags(config: string): string {
     }
   }
 
-  const omxFlags = ["multi_agent", "child_agents_md", "codex_hooks", "collab"];
+  const omxFlags = ["multi_agent", "child_agents_md", "hooks", "codex_hooks", "collab"];
   const filtered: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     if (i > featuresStart && i < sectionEnd) {

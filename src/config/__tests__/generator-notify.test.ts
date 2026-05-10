@@ -63,7 +63,7 @@ describe('config generator', () => {
       const toml = await readFile(configPath, 'utf-8');
 
       assert.match(toml, /^notify = \["node", ".*notify-hook\.js"\]$/m);
-      assert.match(toml, /^codex_hooks = true$/m);
+      assert.match(toml, /^hooks = true$/m);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
@@ -183,7 +183,7 @@ describe('config generator', () => {
 
       // Top-level keys present and before [features]
       assert.match(rerun, /^notify = \["node", ".*notify-hook\.js"\]$/m);
-      assert.match(rerun, /^codex_hooks = true$/m);
+      assert.match(rerun, /^hooks = true$/m);
       assert.match(rerun, /^model_reasoning_effort = "medium"$/m);
       const notifyIdx = rerun.indexOf('notify =');
       const featuresIdx = rerun.indexOf('[features]');
@@ -346,6 +346,29 @@ describe('config generator', () => {
       assert.match(toml, /^\[user.after\]$/m);
       assert.match(toml, /^name = "kept-after"$/m);
       assert.match(toml, /^notify = \["node", ".*notify-hook\.js"\]$/m);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('migrates deprecated codex_hooks feature flag to hooks', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-config-gen-'));
+    try {
+      const configPath = join(wd, 'config.toml');
+      const existing = [
+        '[features]',
+        'codex_hooks = true',
+        'web_search = true',
+        '',
+      ].join('\n');
+      await writeFile(configPath, existing);
+
+      await mergeConfig(configPath, wd);
+      const toml = await readFile(configPath, 'utf-8');
+
+      assert.match(toml, /^hooks = true$/m);
+      assert.doesNotMatch(toml, /^codex_hooks\s*=/m);
+      assert.match(toml, /^web_search = true$/m);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }

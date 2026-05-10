@@ -39,7 +39,7 @@ import {
 	stripOmxEnvSettings,
 	stripOmxFeatureFlags,
 	stripOmxSeededBehavioralDefaults,
-	upsertCodexHooksFeatureFlag,
+	upsertHooksFeatureFlag,
 	OMX_DEVELOPER_INSTRUCTIONS,
 } from "../config/generator.js";
 import { mergeManagedCodexHooksConfig } from "../config/codex-hooks.js";
@@ -1280,7 +1280,7 @@ async function applyPluginModeHooksConfig(
 		? await readFile(configPath, "utf-8")
 		: "";
 	const nextConfig =
-		upsertCodexHooksFeatureFlag(existingConfig).trimEnd() + "\n";
+		upsertHooksFeatureFlag(existingConfig).trimEnd() + "\n";
 	if (nextConfig !== existingConfig) {
 		if (
 			await ensureBackup(

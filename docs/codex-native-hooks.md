@@ -8,7 +8,7 @@ This page is the canonical answer to:
 
 `omx setup` now owns both of these native Codex artifacts:
 
-- `.codex/config.toml` → enables `[features].codex_hooks = true`
+- `.codex/config.toml` → enables `[features].hooks = true`
 - `.codex/hooks.json` → registers the OMX-managed native hook command while preserving non-OMX hook entries already in the file
 
 For project scope, `.gitignore` keeps generated `.codex/hooks.json` out of source control.

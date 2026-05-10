@@ -75,7 +75,7 @@ async function assertProjectPluginModeArtifacts(wd: string): Promise<void> {
 	const hooks = await readFile(join(wd, ".codex", "hooks.json"), "utf-8");
 	assert.match(hooks, /codex-native-hook\.js/);
 	const config = await readFile(join(wd, ".codex", "config.toml"), "utf-8");
-	assert.match(config, /^codex_hooks = true$/m);
+	assert.match(config, /^hooks = true$/m);
 	assert.doesNotMatch(config, /developer_instructions|notify-hook|mcp_servers/);
 	assert.equal(
 		existsSync(join(wd, ".codex", "skills", "help", "SKILL.md")),
@@ -611,7 +611,7 @@ describe("omx setup install mode behavior", () => {
 							.length,
 						1,
 					);
-					assert.match(config, /^codex_hooks = true$/m);
+					assert.match(config, /^hooks = true$/m);
 					assert.doesNotMatch(config, /\[mcp_servers\./);
 					assert.equal(
 						existsSync(join(codexHomeDir, "skills", "help", "SKILL.md")),
@@ -675,7 +675,7 @@ describe("omx setup install mode behavior", () => {
 						join(codexHomeDir, "config.toml"),
 						"utf-8",
 					);
-					assert.match(config, /^codex_hooks = true$/m);
+					assert.match(config, /^hooks = true$/m);
 					assert.doesNotMatch(
 						config,
 						/developer_instructions|notify-hook|mcp_servers/,
@@ -735,7 +735,7 @@ describe("omx setup install mode behavior", () => {
 						"utf-8",
 					);
 					assert.match(config, /developer_instructions\s*=/);
-					assert.match(config, /^codex_hooks = true$/m);
+					assert.match(config, /^hooks = true$/m);
 					assert.doesNotMatch(config, /notify-hook|mcp_servers/);
 
 					const agentsMd = await readFile(
@@ -783,7 +783,7 @@ describe("omx setup install mode behavior", () => {
 
 					const config = await readFile(configPath, "utf-8");
 					assert.match(config, /^developer_instructions = "custom"$/m);
-					assert.match(config, /^codex_hooks = true$/m);
+					assert.match(config, /^hooks = true$/m);
 					assert.equal(
 						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
 						1,
@@ -817,7 +817,7 @@ describe("omx setup install mode behavior", () => {
 						(config.match(/^developer_instructions\s*=/gm) ?? []).length,
 						1,
 					);
-					assert.match(config, /^codex_hooks = true$/m);
+					assert.match(config, /^hooks = true$/m);
 				});
 			});
 		} finally {
@@ -844,7 +844,7 @@ describe("omx setup install mode behavior", () => {
 						join(codexHomeDir, "config.toml"),
 						"utf-8",
 					);
-					assert.match(config, /^codex_hooks = true$/m);
+					assert.match(config, /^hooks = true$/m);
 				});
 			});
 		} finally {
@@ -1092,7 +1092,7 @@ describe("omx setup install mode behavior", () => {
 					const hooks = await readFile(hooksPath, "utf-8");
 					assert.match(hooks, /codex-native-hook\.js/);
 					const config = await readFile(configPath, "utf-8");
-					assert.match(config, /^codex_hooks = true$/m);
+					assert.match(config, /^hooks = true$/m);
 					assert.doesNotMatch(
 						config,
 						/mcp_servers|notify|developer_instructions/,
