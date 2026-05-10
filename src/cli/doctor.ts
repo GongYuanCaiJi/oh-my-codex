@@ -3,8 +3,10 @@
  */
 
 import { existsSync } from "fs";
-import { readdir, readFile } from "fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "fs/promises";
 import { join } from "path";
+import { tmpdir } from "os";
+import { spawnSync } from "child_process";
 import {
 	codexHome,
 	codexConfigPath,
@@ -30,7 +32,10 @@ import {
 	hasLegacyOmxTeamRunTable,
 	getModelContextRecommendation,
 } from "../config/generator.js";
-import { getMissingManagedCodexHookEvents } from "../config/codex-hooks.js";
+import {
+	getManagedCodexHookCommands,
+	getMissingManagedCodexHookEvents,
+} from "../config/codex-hooks.js";
 import { discoverCodexHookConfigPaths } from "../config/codex-hooks.js";
 import { OMX_FIRST_PARTY_MCP_SERVER_NAMES } from "../config/omx-first-party-mcp.js";
 import { getDefaultBridge, isBridgeEnabled } from "../runtime/bridge.js";
@@ -1029,6 +1034,12 @@ async function checkNativeHooks(
 			};
 		}
 
+		const postCompactSmokeCheck = await checkPostCompactHookContract(
+			content,
+			hooksPath,
+		);
+		if (postCompactSmokeCheck) return postCompactSmokeCheck;
+
 		return {
 			name: "Native hooks",
 			status: "pass",
@@ -1042,6 +1053,85 @@ async function checkNativeHooks(
 			message: "cannot read hooks.json",
 		};
 	}
+}
+
+function extractNativeHookScriptPath(command: string): string | null {
+	const match = command.match(
+		/"([^"]*[\\/]codex-native-hook\.js)"|'([^']*[\\/]codex-native-hook\.js)'|(\S*[\\/]codex-native-hook\.js)/,
+	);
+	return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
+}
+
+function oneLine(value: string, maxLength = 240): string {
+	const normalized = value.replace(/\s+/g, " ").trim();
+	if (normalized.length <= maxLength) return normalized;
+	return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+async function checkPostCompactHookContract(
+	hooksContent: string,
+	hooksPath: string,
+): Promise<Check | null> {
+	const commands = getManagedCodexHookCommands(hooksContent, "PostCompact");
+	if (commands === null || commands.length === 0) return null;
+
+	for (const command of commands) {
+		const scriptPath = extractNativeHookScriptPath(command);
+		if (scriptPath && !existsSync(scriptPath)) {
+			return {
+				name: "Native hooks",
+				status: "fail",
+				message: `hooks.json includes OMX-managed coverage, but PostCompact command points to a missing native hook path; inspect ${hooksPath} command=${JSON.stringify(command)} path=${scriptPath}`,
+			};
+		}
+
+		const smokeCwd = await mkdtemp(join(tmpdir(), "omx-doctor-postcompact-"));
+		try {
+			const payload = JSON.stringify({
+				hook_event_name: "PostCompact",
+				cwd: smokeCwd,
+				session_id: "omx-doctor-postcompact-smoke",
+			});
+			const result = spawnSync(command, {
+				cwd: smokeCwd,
+				encoding: "utf-8",
+				env: {
+					...process.env,
+					OMX_DOCTOR_POSTCOMPACT_SMOKE: "1",
+				},
+				input: payload,
+				shell: true,
+				timeout: 3_000,
+				windowsHide: true,
+			});
+			const stdout = result.stdout || "";
+			const stderr = result.stderr || "";
+			if (result.error) {
+				return {
+					name: "Native hooks",
+					status: "fail",
+					message: `hooks.json includes OMX-managed coverage, but the effective PostCompact command could not run; inspect ${hooksPath} command=${JSON.stringify(command)}${scriptPath ? ` path=${scriptPath}` : ""} error=${oneLine(result.error.message)}`,
+				};
+			}
+			if (result.status !== 0) {
+				return {
+					name: "Native hooks",
+					status: "fail",
+					message: `hooks.json includes OMX-managed coverage, but the effective PostCompact command exited ${result.status}; inspect ${hooksPath} command=${JSON.stringify(command)}${scriptPath ? ` path=${scriptPath}` : ""}${stderr ? ` stderr=${JSON.stringify(oneLine(stderr))}` : ""}`,
+				};
+			}
+			if (stdout.trim() !== "") {
+				return {
+					name: "Native hooks",
+					status: "fail",
+					message: `hooks.json includes OMX-managed coverage, but the effective PostCompact command wrote stdout that violates the no-stdout PostCompact contract from #2207; inspect ${hooksPath} command=${JSON.stringify(command)}${scriptPath ? ` path=${scriptPath}` : ""} stdout=${JSON.stringify(oneLine(stdout))}`,
+				};
+			}
+		} finally {
+			await rm(smokeCwd, { recursive: true, force: true }).catch(() => {});
+		}
+	}
+	return null;
 }
 
 async function checkNativeHookRuntimeMirrors(

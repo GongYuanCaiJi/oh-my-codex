@@ -52,6 +52,66 @@ function shouldSkipForSpawnPermissions(err?: string): boolean {
 }
 
 describe("omx doctor onboarding warning copy", () => {
+	it("fails native hooks when registered PostCompact command writes invalid stdout", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-doctor-postcompact-invalid-"));
+		try {
+			const home = join(wd, "home");
+			const codexDir = join(home, ".codex");
+			const staleDir = join(wd, "stale-dist", "scripts");
+			const staleHook = join(staleDir, "codex-native-hook.js");
+			await mkdir(codexDir, { recursive: true });
+			await mkdir(staleDir, { recursive: true });
+			await writeFile(join(codexDir, "config.toml"), "hooks = true\n");
+			await writeFile(
+				staleHook,
+				"process.stdout.write('PostCompact Nudge: stale hook output\\n');\n",
+			);
+			const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(staleHook)}`;
+			const hooks = Object.fromEntries(
+				[
+					"SessionStart",
+					"PreToolUse",
+					"PostToolUse",
+					"UserPromptSubmit",
+					"PreCompact",
+					"PostCompact",
+					"Stop",
+				].map((eventName) => [
+					eventName,
+					[
+						{
+							hooks: [{ type: "command", command }],
+						},
+					],
+				]),
+			);
+			await writeFile(
+				join(codexDir, "hooks.json"),
+				JSON.stringify({ hooks }, null, 2),
+			);
+
+			const res = runOmx(wd, ["doctor", "--verbose"], {
+				HOME: home,
+				CODEX_HOME: codexDir,
+			});
+			if (shouldSkipForSpawnPermissions(res.error)) return;
+			assert.equal(res.status, 0, res.stderr || res.stdout);
+			assert.match(
+				res.stdout,
+				/\[XX\] Native hooks: hooks\.json includes OMX-managed coverage, but the effective PostCompact command wrote stdout/,
+			);
+			assert.match(res.stdout, /no-stdout PostCompact contract from #2207/);
+			assert.match(res.stdout, /codex-native-hook\.js/);
+			assert.match(res.stdout, /PostCompact Nudge: stale hook output/);
+			assert.doesNotMatch(
+				res.stdout,
+				/Native hooks: hooks\.json includes OMX-managed coverage for all native hook events/,
+			);
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
 	it("warns that the built-in explore harness is not ready on Windows", () => {
 		const check = checkExploreHarness("win32", {} as NodeJS.ProcessEnv);
 

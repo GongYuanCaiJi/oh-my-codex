@@ -213,6 +213,34 @@ export function getMissingManagedCodexHookEvents(
   });
 }
 
+export function getManagedCodexHookCommands(
+  content: string,
+  eventName: ManagedHookEventName,
+): string[] | null {
+  const parsed = parseCodexHooksConfig(content);
+  if (!parsed) return null;
+
+  const entries = Array.isArray(parsed.hooks[eventName])
+    ? parsed.hooks[eventName]
+    : [];
+  const commands: string[] = [];
+  for (const entry of entries) {
+    if (!isPlainObject(entry) || !Array.isArray(entry.hooks)) continue;
+    for (const hook of entry.hooks) {
+      if (
+        !isPlainObject(hook) ||
+        hook.type !== "command" ||
+        typeof hook.command !== "string" ||
+        !isOmxManagedHookCommand(hook.command)
+      ) {
+        continue;
+      }
+      commands.push(hook.command);
+    }
+  }
+  return commands;
+}
+
 function stripManagedHooksFromEntry(entry: unknown): {
   entry: unknown | null;
   removedCount: number;
