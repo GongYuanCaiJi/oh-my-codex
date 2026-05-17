@@ -503,6 +503,7 @@ fn classify_team(team: &str, worker: &str) -> Option<Diagnostics> {
 }
 
 fn classify_worker_status(status: &str) -> Option<Diagnostics> {
+    // Keep this mapping aligned with the WorkerStatus.state union in src/team/state.ts.
     let state = extract_json_string(status, "state")
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_else(|| status.to_ascii_lowercase());

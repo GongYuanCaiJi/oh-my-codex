@@ -646,6 +646,16 @@ fn json_mode_treats_worker_status_working_as_busy() {
 }
 
 #[test]
+fn json_mode_reports_blocked_worker_status() {
+    let stdout = run_team_status_diagnostics(
+        r#"{"state":"blocked","updated_at":"2026-05-17T20:00:00.000Z"}"#,
+    );
+
+    assert!(stdout.contains("\"classification\": \"waiting_for_input\""));
+    assert!(stdout.contains("\"next_action\": \"inspect raw pane\""));
+}
+
+#[test]
 fn json_mode_reports_failed_worker_status() {
     let stdout = run_team_status_diagnostics(
         r#"{"state":"failed","updated_at":"2026-05-17T20:00:00.000Z"}"#,
@@ -653,6 +663,18 @@ fn json_mode_reports_failed_worker_status() {
 
     assert!(stdout.contains("\"classification\": \"test_failure\""));
     assert!(stdout.contains("worker status is failed"));
+}
+
+#[test]
+fn json_mode_leaves_inactive_worker_statuses_to_output_heuristics() {
+    for state in ["idle", "done", "draining", "unknown"] {
+        let stdout = run_team_status_diagnostics(&format!(
+            r#"{{"state":"{state}","updated_at":"2026-05-17T20:00:00.000Z"}}"#
+        ));
+
+        assert!(stdout.contains("\"classification\": \"unknown\""));
+        assert!(!stdout.contains("do not shutdown yet"));
+    }
 }
 
 #[test]
