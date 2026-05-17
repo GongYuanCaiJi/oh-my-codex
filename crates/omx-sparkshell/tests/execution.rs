@@ -584,6 +584,11 @@ fn team_diagnostics_reads_last_turn_at_heartbeat() {
         r#"{"last_turn_at":"1970-01-01T00:00:00.000Z"}"#,
     )
     .expect("heartbeat");
+    fs::write(
+        worker_dir.join("status.json"),
+        r#"{"state":"working","current_task_id":"1","updated_at":"2026-05-17T20:00:00.000Z"}"#,
+    )
+    .expect("status");
 
     let output = Command::new(sparkshell_bin())
         .env("OMX_TEAM_STATE_ROOT", temp.display().to_string())
@@ -602,6 +607,52 @@ fn team_diagnostics_reads_last_turn_at_heartbeat() {
         String::from_utf8_lossy(&output.stdout).contains("\"classification\": \"stale_heartbeat\"")
     );
     let _ = fs::remove_dir_all(temp);
+}
+
+fn run_team_status_diagnostics(status_json: &str) -> String {
+    let temp = unique_temp_dir("team-status");
+    let worker_dir = temp.join("team/demo/workers/worker-1");
+    fs::create_dir_all(&worker_dir).expect("worker dir");
+    fs::write(worker_dir.join("status.json"), status_json).expect("status");
+
+    let output = Command::new(sparkshell_bin())
+        .env("OMX_TEAM_STATE_ROOT", temp.display().to_string())
+        .arg("--json")
+        .arg("--team")
+        .arg("demo")
+        .arg("--worker")
+        .arg("worker-1")
+        .arg("sh")
+        .arg("-c")
+        .arg("printf 'quiet\n'")
+        .output()
+        .expect("run sparkshell");
+
+    let _ = fs::remove_dir_all(temp);
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn json_mode_treats_worker_status_working_as_busy() {
+    let stdout = run_team_status_diagnostics(
+        r#"{"state":"working","current_task_id":"1","updated_at":"2026-05-17T20:00:00.000Z"}"#,
+    );
+
+    assert!(stdout.contains("\"classification\": \"busy_processing\""));
+    assert!(stdout.contains("\"next_action\": \"wait\""));
+    assert!(stdout.contains("do not shutdown yet"));
+    assert!(!stdout.contains("\"classification\": \"unknown\""));
+}
+
+#[test]
+fn json_mode_reports_failed_worker_status() {
+    let stdout = run_team_status_diagnostics(
+        r#"{"state":"failed","updated_at":"2026-05-17T20:00:00.000Z"}"#,
+    );
+
+    assert!(stdout.contains("\"classification\": \"test_failure\""));
+    assert!(stdout.contains("worker status is failed"));
 }
 
 #[test]

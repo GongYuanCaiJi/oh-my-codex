@@ -494,28 +494,62 @@ fn classify_team(team: &str, worker: &str) -> Option<Diagnostics> {
     }
 
     if let Ok(status) = fs::read_to_string(base.join("status.json")) {
-        let normalized = status.to_ascii_lowercase();
-        if normalized.contains("blocked") || normalized.contains("needs_input") {
-            return Some(Diagnostics {
-                classification: "waiting_for_input".to_string(),
-                next_action: "inspect raw pane".to_string(),
-                confidence: 0.7,
-                errors: Vec::new(),
-                warnings: Vec::new(),
-            });
+        if let Some(diagnostics) = classify_worker_status(&status) {
+            return Some(diagnostics);
         }
-        if normalized.contains("busy") || normalized.contains("in_progress") {
-            return Some(Diagnostics {
+    }
+
+    None
+}
+
+fn classify_worker_status(status: &str) -> Option<Diagnostics> {
+    let state = extract_json_string(status, "state")
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| status.to_ascii_lowercase());
+
+    match state.as_str() {
+        "working" | "busy" | "in_progress" => Some(Diagnostics {
+            classification: "busy_processing".to_string(),
+            next_action: "wait".to_string(),
+            confidence: 0.72,
+            errors: Vec::new(),
+            warnings: vec!["do not shutdown yet".to_string()],
+        }),
+        "blocked" | "needs_input" => Some(Diagnostics {
+            classification: "waiting_for_input".to_string(),
+            next_action: "inspect raw pane".to_string(),
+            confidence: 0.7,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }),
+        "failed" => Some(Diagnostics {
+            classification: "test_failure".to_string(),
+            next_action: "inspect raw pane".to_string(),
+            confidence: 0.7,
+            errors: vec!["worker status is failed".to_string()],
+            warnings: Vec::new(),
+        }),
+        _ if state.contains("working")
+            || state.contains("busy")
+            || state.contains("in_progress") =>
+        {
+            Some(Diagnostics {
                 classification: "busy_processing".to_string(),
                 next_action: "wait".to_string(),
                 confidence: 0.72,
                 errors: Vec::new(),
                 warnings: vec!["do not shutdown yet".to_string()],
-            });
+            })
         }
+        _ if state.contains("blocked") || state.contains("needs_input") => Some(Diagnostics {
+            classification: "waiting_for_input".to_string(),
+            next_action: "inspect raw pane".to_string(),
+            confidence: 0.7,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }),
+        _ => None,
     }
-
-    None
 }
 
 fn extract_heartbeat_ms(text: &str) -> Option<u64> {
