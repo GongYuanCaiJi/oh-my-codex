@@ -164,6 +164,38 @@ fn summary_mode_uses_local_api_and_model_override() {
 }
 
 #[test]
+fn summary_mode_redacts_secret_like_output_before_prompt_request() {
+    let request_log = Arc::new(Mutex::new(String::new()));
+    let request_log_for_server = Arc::clone(&request_log);
+    let (base_url, server) = start_api_server(1, move |request| {
+        *request_log_for_server.lock().expect("request log") = request;
+        (200, response_json("- summary: redacted output summarized"))
+    });
+
+    let output = Command::new(sparkshell_bin())
+        .env("OMX_API_BASE_URL", base_url)
+        .env("OMX_SPARKSHELL_LINES", "1")
+        .env("CHILD_API_TOKEN", "super-secret-token")
+        .env("CHILD_BEARER", "bearer-secret-token")
+        .arg("sh")
+        .arg("-c")
+        .arg("printf 'API_TOKEN=%s\\nline-2\\n' \"$CHILD_API_TOKEN\"; printf 'Authorization: Bearer %s\\n' \"$CHILD_BEARER\" >&2")
+        .output()
+        .expect("run sparkshell");
+    server.join().expect("api server");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("redacted output summarized"));
+
+    let request = request_log.lock().expect("request log");
+    assert!(request.contains("API_TOKEN=[REDACTED]"));
+    assert!(request.contains("Authorization: Bearer [REDACTED]"));
+    assert!(request.contains("line-2"));
+    assert!(!request.contains("super-secret-token"));
+    assert!(!request.contains("bearer-secret-token"));
+}
+
+#[test]
 fn summary_mode_injects_model_instructions_file_override() {
     let temp = unique_temp_dir("api-instructions-file");
     let instructions_file = temp.join("sparkshell-lightweight-AGENTS.md");
@@ -700,7 +732,10 @@ fn pane_cache_key_does_not_escape_cache_dir_for_path_like_pane_ids() {
     let outside = temp.join("outside-pr2371.txt");
 
     fs::create_dir_all(&intermediate).expect("intermediate cache dir");
-    write_executable(&tmux, "#!/bin/sh\nprintf 'safe pane output\n'\n");
+    write_executable(&tmux, "#!/bin/sh
+printf 'safe pane output
+'
+");
     let path = format!(
         "{}:{}",
         temp.display(),
@@ -754,8 +789,13 @@ fn pane_cache_does_not_persist_raw_secret_like_text() {
     let cache = temp.join("cache");
     let pane = temp.join("pane.txt");
     let secret_line = "OPENAI_API_KEY=sk-test-secret";
-    fs::write(&pane, format!("starting\n{secret_line}\nfinished\n")).expect("pane");
-    write_executable(&tmux, &format!("#!/bin/sh\ncat {}\n", pane.display()));
+    fs::write(&pane, format!("starting
+{secret_line}
+finished
+")).expect("pane");
+    write_executable(&tmux, &format!("#!/bin/sh
+cat {}
+", pane.display()));
     let path = format!(
         "{}:{}",
         temp.display(),
@@ -790,4 +830,42 @@ fn pane_cache_does_not_persist_raw_secret_like_text() {
     assert!(cached.contains("lines=3"));
 
     let _ = fs::remove_dir_all(temp);
+}
+
+#[test]
+fn raw_mode_preserves_non_utf8_bytes() {
+    let temp = unique_temp_dir("raw-non-utf8");
+    let script = temp.join("raw-bytes");
+    write_executable(
+        &script,
+        r#"#!/usr/bin/env bash
+printf '\xff\xfe\n'
+"#,
+    );
+
+    let output = Command::new(sparkshell_bin())
+        .arg(script)
+        .output()
+        .expect("run sparkshell");
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, vec![0xff, 0xfe, b'\n']);
+    let _ = fs::remove_dir_all(temp);
+}
+
+#[test]
+fn shell_mode_executes_explicit_shell_and_redacts_json_output() {
+    let output = Command::new(sparkshell_bin())
+        .arg("--json")
+        .arg("--shell")
+        .arg("printf 'left && right\n'; printf 'Authorization: Bearer secret-token\n' >&2")
+        .output()
+        .expect("run sparkshell");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"mode\": \"shell\""));
+    assert!(stdout.contains("left && right"));
+    assert!(stdout.contains("Authorization: Bearer [REDACTED]"));
+    assert!(stdout.contains(r#""redactions": {"count": 1}"#));
 }
