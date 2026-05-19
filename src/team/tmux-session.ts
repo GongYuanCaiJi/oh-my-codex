@@ -1184,10 +1184,15 @@ export function createTeamSession(
     const leaderPaneId = chooseTeamLeaderPaneId(panes, detectedLeaderPaneId);
     tagPaneInstance(leaderPaneId, instanceId);
     const initialHudPaneIds = findHudPaneIds(teamTarget, leaderPaneId);
-    // Team mode prioritizes leader + worker visibility. Remove HUD panes in this window
-    // to keep a clean "leader left / workers right" layout.
-    for (const hudPaneId of initialHudPaneIds) {
-      runTmux(['kill-pane', '-t', hudPaneId]);
+    const omxEntry = resolveOmxCliEntryPath();
+    const canRecreateTeamHud = Boolean(omxEntry && omxEntry.trim() !== '');
+    // Team mode prioritizes leader + worker visibility. Remove HUD panes only
+    // when we can recreate the team HUD. Otherwise keep the existing HUD alive
+    // instead of making it disappear on team startup failures or broken installs.
+    if (canRecreateTeamHud) {
+      for (const hudPaneId of initialHudPaneIds) {
+        runTmux(['kill-pane', '-t', hudPaneId]);
+      }
     }
 
     const workerPaneIds: string[] = [];
@@ -1261,8 +1266,7 @@ export function createTeamSession(
     let hudPaneId: string | null = null;
     let resizeHookName: string | null = null;
     let resizeHookTarget: string | null = null;
-    const omxEntry = resolveOmxCliEntryPath();
-    if (omxEntry && omxEntry.trim() !== '') {
+    if (canRecreateTeamHud && omxEntry) {
       const hudCmd = `env ${OMX_TMUX_HUD_OWNER_ENV}=1 node ${shellQuoteSingle(translatePathForMsys(omxEntry))} hud --watch`;
       const hudCwd = translatePathForMsys(cwd);
       const hudResult = runTmux([
