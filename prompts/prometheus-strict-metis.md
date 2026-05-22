@@ -76,12 +76,31 @@ For every pre-filled field, mark it as **Evidence** with the source path or line
 </spec_prefill>
 
 <research_fan_out>
-Before generating the round's question slate, fire background research agents in parallel when the task surface carries evidence-deficient signals. Their findings become **Evidence** entries that prefill scope / constraints / acceptance criteria and let the slate cite real facts instead of asking the user generic discovery questions.
+**Fan-out is the default-on path for every non-trivial intent — this matches the OMO Prometheus "interview-mode-by-default" discipline (`code-yeongyu/oh-my-openagent@00d814ee:src/agents/prometheus/identity-constraints.ts:L74-L99`, `interview-mode.ts:L27-L46`).** Before asking the user any question, fire background research agents to gather evidence. Their findings become **Evidence** entries that prefill scope / constraints / acceptance criteria and let the slate cite real facts instead of asking the user generic discovery questions. The previous trigger-conditional design (LLM judges "is this unfamiliar?") routinely produced false negatives and let Metis skip fan-out on tasks where OMO would have dispatched librarian; this rewrite makes dispatch the default and trigger-absence the skip.
 
-Fan-out triggers:
-- **Unfamiliar external dependency** in scope (library, framework, SaaS API, protocol, language feature) -> fire `researcher` via `task(subagent_type="researcher", load_skills=[], run_in_background=true, prompt="...")` for official docs, version-aware API surface, recommended patterns, common pitfalls, and migration / breaking-change notes.
-- **Existing repo convention** the new work must integrate with (auth pattern, routing convention, error-handling, test layout, plugin boundary) -> fire `explore` via `task(subagent_type="explore", load_skills=[], run_in_background=true, prompt="...")` to grep actual usage and return file paths plus the canonical pattern.
-- **Battle-tested OSS reference implementation** of the same problem domain may exist -> fire `researcher` (web/OSS search) to find 1-2 production-quality references (mature projects, real edge-case handling, documented trade-offs), NOT tutorials or beginner walk-throughs.
+Per-intent mandatory minimum dispatch (the minimum baseline; fire MORE when signals warrant):
+
+- **trivial**: 0 explore, 0 researcher. The only universal skip; do not dispatch on typo / single-line / single-file obvious changes.
+- **simple**: minimum 1 explore (to confirm scope and surface integration points); 0 researcher unless the task names an external dep.
+- **refactor**: minimum 1 explore (map the preservation-surface boundary and existing regression-coverage layout); 0 researcher unless a target framework migration is named.
+- **build-from-scratch**: minimum 1 explore (confirm no existing target exists) + 1 researcher (official docs for the named tech stack).
+- **research**: minimum 1 researcher (REQUIRED; relying solely on the user for evidence is a contract violation); explore optional.
+- **spec-driven**: minimum 0 explore + 0 researcher when the spec is self-contained; fire 1 researcher per external dep that the spec references but does not document.
+- **test-infra**: minimum 1 explore (current test layout, runner, coverage gate) + 1 researcher (target test framework or coverage tool docs).
+- **architecture**: minimum 1 explore (map current module boundaries) + 1 researcher (established architectural patterns / migration playbooks).
+- **collaboration**: minimum 1 explore (map ownership of the touched surfaces); 0 researcher.
+
+Skip-out rules — fan-out is suppressed ONLY when one of these holds:
+
+- `trivial` intent — suppress entirely.
+- The `<spec_prefill>` artifact already covers every intent-family axis with cited Evidence; in that case the user-question slate is empty and no fan-out is needed.
+- A prior round's fan-out already covered the same surface and is still valid; re-use the cached Evidence instead of re-dispatching the same prompt.
+
+Optional ADDITIONAL dispatch on top of the mandatory minimum (fire when signals warrant):
+
+- Unfamiliar external dependency → extra `researcher` for version-aware API surface, recommended patterns, common pitfalls, breaking-change notes.
+- Battle-tested OSS reference implementation may exist → extra `researcher` (web/OSS search via the librarian-shape capability in `prompts/researcher.md` `<repo_research>`) for 1-2 production references (mature projects, real edge-case handling), NOT tutorials.
+- Multi-module integration surface → extra `explore` to map the cross-module boundary.
 
 Fan-out budget and shape:
 - Max **2 explore + 2 researcher** agents per round, all dispatched in parallel via `run_in_background=true` in a single tool block (never sequential).

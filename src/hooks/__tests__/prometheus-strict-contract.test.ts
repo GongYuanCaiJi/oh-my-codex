@@ -271,6 +271,18 @@ describe('prometheus-strict clean-room contract', () => {
     assert.match(metis, /(?:TDD|test[\s-]?first)[\s\S]{0,300}(?:after[\s-]?implementation|post[\s-]?implementation|agent[\s-]?QA|none)/i, 'metis test-strategy decision must offer the canonical option set (TDD / test-after-implementation / agent-QA only / no automated tests)');
   });
 
+  it('fan-out defaults to ON for non-trivial intents with per-intent mandatory minimums, matching OMO interview-mode-by-default', () => {
+    const metis = readRepoFile(join(repoRoot, 'prompts', 'prometheus-strict-metis.md'));
+
+    assert.match(metis, /(?:default[\s-]?on|interview[\s-]?mode[\s-]?by[\s-]?default|Before (?:your |the )?first question|fan[\s-]?out is the default)/i, 'metis research_fan_out must declare default-on dispatch (OMO interview-mode-by-default), not trigger-conditional');
+    assert.match(metis, /(?:per[\s-]?intent mandatory minimum|mandatory minimum dispatch|minimum per[\s-]?intent)/i, 'metis must declare per-intent mandatory minimum dispatch counts');
+    assert.match(metis, /refactor[\s\S]{0,200}(?:1[\s\S]{0,10}explore|>=\s*1\s*explore|min(?:imum)?[\s\S]{0,20}1\s*explore)/i, 'metis must require minimum 1 explore for refactor intent (preservation surface map)');
+    assert.match(metis, /build[\s-]?from[\s-]?scratch[\s\S]{0,200}(?:1[\s\S]{0,10}explore[\s\S]{0,100}1[\s\S]{0,10}researcher|explore[\s\S]{0,30}researcher)/i, 'metis must require minimum 1 explore + 1 researcher for build-from-scratch');
+    assert.match(metis, /architecture[\s\S]{0,200}(?:1[\s\S]{0,10}explore[\s\S]{0,100}1[\s\S]{0,10}researcher|explore[\s\S]{0,30}researcher)/i, 'metis must require minimum 1 explore + 1 researcher for architecture');
+    assert.match(metis, /test[\s-]?infra[\s\S]{0,200}(?:explore[\s\S]{0,80}researcher|1[\s\S]{0,10}explore)/i, 'metis must require minimum dispatch for test-infra');
+    assert.match(metis, /(?:skip[\s\S]{0,30}only when|skip[\s-]?out rule|skip rule)[\s\S]{0,300}trivial/i, 'metis must declare skip-out rules (trivial is the only universal skip)');
+  });
+
   it('detects user hostility or non-answer responses and exits the interview instead of incrementing the clearance count', () => {
     const metis = readRepoFile(join(repoRoot, 'prompts', 'prometheus-strict-metis.md'));
     const skill = readRepoFile(skillPath);
