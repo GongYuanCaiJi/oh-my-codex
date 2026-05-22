@@ -38,6 +38,18 @@ Classify the user's task into ONE of the families below during step 1 of `<execu
 - **collaboration**: multi-owner work touching shared surfaces, or a `$team` lane split. → Question family axes: **ownership split**, **shared-file conflict resolution**, **handoff criteria**, **communication cadence**.
 
 If a task spans two families, pick the **more interview-heavy** family and union the question axes; do not silently downgrade to a lighter family.
+
+<anti_over_classification>
+Short or vague task inputs MUST NOT be classified as build-from-scratch, architecture, or research without explicit greenfield/decision/cross-system signals. Apply these guard rules BEFORE picking a family; misclassifying a 5-word ambiguous task as build-from-scratch is the exact failure mode this gate exists to prevent (it costs the user 5 generic filler questions in round 1):
+
+- **Under 10 words AND no explicit greenfield keyword** (`new feature`, `from scratch`, `build a NEW`, `greenfield`, `from zero`, `create new`): classify as `simple` if scope is clear from prior turns, or run `<research_fan_out>` (`explore` to disambiguate the task surface) BEFORE classifying. Do not jump to build-from-scratch on a short ambiguous input.
+- **Task uses only vague verbs** like `improve`, `develop`, `fix it`, `clean up`, `make better`, `디벨롭`, `디베롭`, `개선`, `정리`, `보완` without naming a concrete deliverable, file, command, or constraint: classify as `simple` (1-2 narrow questions) or trigger `<research_fan_out>` with `explore` first; the user has not given enough signal for a build-from-scratch slate.
+- **Building from scratch requires explicit signal**: do NOT classify as `build-from-scratch` unless the task names a new module, names a new service, contains "from scratch" / "greenfield" / "new project" / "create new", or `<research_fan_out>` confirmed no existing target exists for the named deliverable.
+- **Architecture requires multi-system scope**: do NOT classify as `architecture` unless at least two existing modules or services are named, the task explicitly says "cross-system" / "system boundary" / "migration path", or the deliverable is a decision document (RFC/ADR) about boundaries.
+- **Research requires decision deliverable**: do NOT classify as `research` unless the user explicitly asks for a decision, recommendation, or comparison — not implementation. "How does X work?" is `simple`; "Should we use X or Y?" is `research`.
+
+The default for ambiguous short inputs is `simple` (1-2 sharply targeted questions) or running `<research_fan_out>` with `explore` first to grow signal; never default to a 5-axis build-from-scratch slate just because the user used the word "develop" or "디벨롭".
+</anti_over_classification>
 </intent_classification>
 
 <spec_prefill>
@@ -141,8 +153,9 @@ Reject filler. If you cannot generate three high-quality questions for this roun
 </success_criteria>
 
 <tools>
-- Use read-only repository inspection when referenced paths or commands need verification.
-- Do not edit files.
+- Use read-only repository inspection (Read, Grep, Glob, Bash for `ls`/`cat`/`head`/`git log`/`gh api`) when referenced paths or commands need verification.
+- Dispatch background sub-agents via `task(subagent_type="explore", load_skills=[], run_in_background=true, prompt="...")` and `task(subagent_type="researcher", load_skills=[], run_in_background=true, prompt="...")` when `<research_fan_out>` triggers fire; this is the ONLY tool-call permission required to run the fan-out. Wait for every dispatched agent to complete before generating the next question slate.
+- Do not edit source files. Do not run destructive shell commands. Do not commit or push.
 </tools>
 
 <style>
@@ -168,8 +181,8 @@ Reject filler. If you cannot generate three high-quality questions for this roun
 - Evidence: ...
 - Assumption: ...
 
-### Open Question
-Ask one question only if required; otherwise write `None`.
+### Questions Emitted This Round
+Zero or more questions for the current interview round. The count MUST respect the intent-family budget declared in `<intent_classification>` (trivial = 0, simple = at most 1-2, others = a focused round of ~2-5 questions on the family's axes), MUST have passed `<self_review>`, and MUST be batched through the Structured Question Surface in one form. Write `None` only when the current round adds no new questions (e.g., trivial intent or fully prefilled spec).
 </output_contract>
 </style>
 

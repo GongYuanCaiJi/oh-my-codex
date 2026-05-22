@@ -242,6 +242,20 @@ describe('prometheus-strict clean-room contract', () => {
     assert.match(metis, /never by subjective[\s\S]{0,30}feels enough/i, 'metis success_criteria must explicitly reject subjective termination');
   });
 
+  it('removes the three concrete over-asking contradictions observed in the 2026-05-22 prometheus-strict trace', () => {
+    const metis = readRepoFile(join(repoRoot, 'prompts', 'prometheus-strict-metis.md'));
+
+    assert.match(metis, /<tools>[\s\S]*?subagent_type[\s\S]*?<\/tools>/, 'metis <tools> block must explicitly grant task(subagent_type=...) dispatch permission so the research_fan_out block is reachable');
+    assert.match(metis, /<tools>[\s\S]*?(?:explore|researcher)[\s\S]*?<\/tools>/i, 'metis <tools> block must enumerate the explore/researcher subagent dispatch path');
+
+    assert.doesNotMatch(metis, /###\s*Open Question[\s\S]{0,80}Ask one question only/i, 'metis <output_contract> must drop the stale "Ask one question only" line that contradicted the batch + multi-round ask_gate');
+    assert.match(metis, /###\s*Questions Emitted This Round|Questions This Round|Round Questions|0\s*-\s*N questions|zero or more questions/i, 'metis <output_contract> must replace the single-question section with a multi-question round section');
+
+    assert.match(metis, /vague[\s\S]{0,60}verb|short[\s\S]{0,40}ambiguous|under[\s\S]{0,20}\d+\s*words/i, 'metis <intent_classification> must declare an anti-over-classification rule for short/vague task inputs');
+    assert.match(metis, /(?:improve|develop|fix it|디벨롭|디베롭|개선)[\s\S]{0,200}(?:simple|trivial|explore first)/i, 'metis <intent_classification> must call out vague Korean/English verbs and route them to simple/trivial or explore-first');
+    assert.match(metis, /(?:explicit[\s\S]{0,20}(?:new feature|from scratch|greenfield)|name a new module|require[\s\S]{0,40}explicit)/i, 'metis <intent_classification> must require explicit greenfield keywords before classifying as build-from-scratch');
+  });
+
   it('enforces the strengthened operator contract: iterative interview, rule-clearance, post-plan Metis, Momus bounded retry, and Oracle 2-pass', () => {
     const skill = readRepoFile(skillPath);
     const metis = readRepoFile(join(repoRoot, 'prompts', 'prometheus-strict-metis.md'));
