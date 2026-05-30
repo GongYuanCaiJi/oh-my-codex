@@ -10,6 +10,8 @@ import {
   readUserInstallStamp,
   resolveAutoUpdateMode,
   resolveInstalledCliEntry,
+  formatDeferredSetupCommand,
+  resolveSetupRefreshArgs,
   runDeferredGlobalUpdate,
   runImmediateUpdate,
   shouldCheckForUpdates,
@@ -770,10 +772,99 @@ describe('runDeferredGlobalUpdate', () => {
       assert.equal((calls[0].options.env as NodeJS.ProcessEnv | undefined)?.OMX_DEFERRED_UPDATE_LOG, result.logPath);
       assert.match(calls[0].args[4], /Get-Process -Id \$parentPid/);
       assert.match(calls[0].args[4], /npm install -g oh-my-codex@latest/);
-      assert.match(calls[0].args[4], /omx setup/);
+      assert.match(calls[0].args[4], /& 'omx' 'setup'/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
+  });
+
+  it('preserves plugin setup delivery mode for deferred post-update refreshes', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-deferred-update-plugin-'));
+    const calls: Array<{ command: string; args: string[] }> = [];
+
+    try {
+      await mkdir(join(cwd, '.omx'), { recursive: true });
+      await writeFile(
+        join(cwd, '.omx', 'setup-scope.json'),
+        JSON.stringify({ scope: 'user', installMode: 'plugin', mcpMode: 'none' }, null, 2),
+      );
+
+      const result = runDeferredGlobalUpdate(
+        cwd,
+        ((command, args) => {
+          calls.push({ command, args: args as string[] });
+          return {
+            once() {
+              return this;
+            },
+            unref() {},
+          } as unknown as ReturnType<typeof import('node:child_process').spawn>;
+        }) as typeof import('node:child_process').spawn,
+        'linux',
+        12345,
+      );
+
+      assert.equal(result.ok, true);
+      assert.equal(calls.length, 1);
+      assert.match(calls[0].args[1], /'omx' 'setup' '--scope' 'user' '--plugin' '--mcp' 'none'/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('snapshots deferred setup refresh args when scheduling the detached updater', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-deferred-update-snapshot-'));
+    const calls: Array<{ command: string; args: string[] }> = [];
+
+    try {
+      await mkdir(join(cwd, '.omx'), { recursive: true });
+      const setupScopePath = join(cwd, '.omx', 'setup-scope.json');
+      await writeFile(
+        setupScopePath,
+        JSON.stringify({ scope: 'user', installMode: 'plugin', mcpMode: 'none' }, null, 2),
+      );
+
+      const result = runDeferredGlobalUpdate(
+        cwd,
+        ((command, args) => {
+          calls.push({ command, args: args as string[] });
+          return {
+            once() {
+              return this;
+            },
+            unref() {},
+          } as unknown as ReturnType<typeof import('node:child_process').spawn>;
+        }) as typeof import('node:child_process').spawn,
+        'linux',
+        12345,
+      );
+
+      await writeFile(
+        setupScopePath,
+        JSON.stringify({ scope: 'project', installMode: 'legacy', mcpMode: 'compat' }, null, 2),
+      );
+
+      assert.equal(result.ok, true);
+      assert.equal(calls.length, 1);
+      assert.match(calls[0].args[1], /'omx' 'setup' '--scope' 'user' '--plugin' '--mcp' 'none'/);
+      assert.doesNotMatch(calls[0].args[1], /compat/);
+      assert.doesNotMatch(calls[0].args[1], /legacy/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('quotes deferred setup command arguments at the shell boundary', () => {
+    const args = ['setup', '--scope', 'user project', '--mcp', "none'; echo pwned #", '--flag', ''];
+
+    assert.equal(
+      formatDeferredSetupCommand('linux', 'omx tool', args),
+      "'omx tool' 'setup' '--scope' 'user project' '--mcp' 'none'\\''; echo pwned #' '--flag' ''",
+    );
+    assert.equal(
+      formatDeferredSetupCommand('win32', 'omx tool', args),
+      "& 'omx tool' 'setup' '--scope' 'user project' '--mcp' 'none''; echo pwned #' '--flag' ''",
+    );
   });
 });
 
@@ -837,5 +928,72 @@ describe('post-update setup refresh handoff', () => {
 
     assert.equal(result.ok, true);
     assert.equal(receivedTimeout, undefined);
+  });
+
+  it('passes persisted plugin setup choices to the updated CLI refresh', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-update-plugin-refresh-'));
+    const received: Array<{ command: string; args: string[] }> = [];
+
+    try {
+      await mkdir(join(cwd, '.omx'), { recursive: true });
+      await writeFile(
+        join(cwd, '.omx', 'setup-scope.json'),
+        JSON.stringify({ scope: 'user', installMode: 'plugin', mcpMode: 'none' }, null, 2),
+      );
+
+      const result = spawnInstalledSetupRefresh(
+        '/tmp/omx.js',
+        cwd,
+        ((command, args) => {
+          received.push({ command, args: args as string[] });
+          return { status: 0, error: undefined };
+        }) as typeof import('node:child_process').spawnSync,
+      );
+
+      assert.equal(result.ok, true);
+      assert.deepEqual(received[0]?.args, [
+        '/tmp/omx.js',
+        'setup',
+        '--scope',
+        'user',
+        '--plugin',
+        '--mcp',
+        'none',
+      ]);
+      assert.deepEqual(resolveSetupRefreshArgs(cwd), [
+        'setup',
+        '--scope',
+        'user',
+        '--plugin',
+        '--mcp',
+        'none',
+      ]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+
+  it('migrates legacy project-local scope when building update setup refresh args', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-update-plugin-legacy-scope-'));
+
+    try {
+      await mkdir(join(cwd, '.omx'), { recursive: true });
+      await writeFile(
+        join(cwd, '.omx', 'setup-scope.json'),
+        JSON.stringify({ scope: 'project-local', installMode: 'plugin', mcpMode: 'none' }, null, 2),
+      );
+
+      assert.deepEqual(resolveSetupRefreshArgs(cwd), [
+        'setup',
+        '--scope',
+        'project',
+        '--plugin',
+        '--mcp',
+        'none',
+      ]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });

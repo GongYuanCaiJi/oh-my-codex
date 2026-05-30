@@ -13,6 +13,7 @@ import { spawn, spawnSync } from 'child_process';
 import { createInterface } from 'readline/promises';
 import { getPackageRoot } from '../utils/package.js';
 import { omxUserInstallStampPath } from '../utils/paths.js';
+import { readPersistedSetupPreferencesSync } from './setup-preferences.js';
 
 export interface UpdateState {
   last_checked_at: string;
@@ -149,6 +150,45 @@ function runGlobalUpdate(): RunGlobalUpdateResult {
   return { ok: true, stderr: '' };
 }
 
+
+export function resolveSetupRefreshArgs(cwd: string): string[] {
+  const preferences = readPersistedSetupPreferencesSync(cwd);
+  const args = ['setup'];
+  if (preferences?.scope) {
+    args.push('--scope', preferences.scope);
+  }
+  if (preferences?.installMode === 'plugin') {
+    args.push('--plugin');
+  } else if (preferences?.installMode === 'legacy') {
+    args.push('--legacy');
+  }
+  if (preferences?.mcpMode) {
+    args.push('--mcp', preferences.mcpMode);
+  }
+  return args;
+}
+
+function quotePosixShellArg(value: string): string {
+  if (value === '') return "''";
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function quotePowerShellArg(value: string): string {
+  return `'${value.replace(/'/g, `''`)}'`;
+}
+
+export function formatDeferredSetupCommand(
+  platform: NodeJS.Platform,
+  command: string,
+  args: string[],
+): string {
+  const argv = [command, ...args];
+  if (platform === 'win32') {
+    return `& ${argv.map(quotePowerShellArg).join(' ')}`;
+  }
+  return argv.map(quotePosixShellArg).join(' ');
+}
+
 function formatUpdateLogPath(date = new Date()): string {
   return `update-${date.toISOString().replace(/[:.]/g, '-')}.log`;
 }
@@ -160,6 +200,11 @@ export function runDeferredGlobalUpdate(
   parentPid = process.pid,
 ): RunDeferredUpdateResult {
   const logPath = join(cwd, '.omx', 'logs', formatUpdateLogPath());
+  // Snapshot the current setup delivery mode when the update is scheduled.
+  // The detached process runs after this CLI exits, so the refresh should replay
+  // the setup mode that was active when the user accepted/scheduled the update.
+  const setupArgs = resolveSetupRefreshArgs(cwd);
+  const setupCommand = formatDeferredSetupCommand(platform, 'omx', setupArgs);
 
   try {
     mkdirSync(dirname(logPath), { recursive: true });
@@ -183,7 +228,7 @@ export function runDeferredGlobalUpdate(
             '$parentPid = [int]$env:OMX_DEFERRED_UPDATE_PARENT_PID',
             'while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 1 }',
             'npm install -g oh-my-codex@latest *>> $log',
-            'if ($LASTEXITCODE -eq 0) { omx setup *>> $log }',
+            `if ($LASTEXITCODE -eq 0) { ${setupCommand} *>> $log }`,
           ].join('; '),
         ]
       : [
@@ -191,7 +236,7 @@ export function runDeferredGlobalUpdate(
           [
             'while kill -0 "$OMX_DEFERRED_UPDATE_PARENT_PID" 2>/dev/null; do sleep 1; done',
             'npm install -g oh-my-codex@latest >> "$OMX_DEFERRED_UPDATE_LOG" 2>&1',
-            'if [ "$?" -eq 0 ]; then omx setup >> "$OMX_DEFERRED_UPDATE_LOG" 2>&1; fi',
+            `if [ "$?" -eq 0 ]; then ${setupCommand} >> "$OMX_DEFERRED_UPDATE_LOG" 2>&1; fi`,
           ].join('; '),
         ];
 
@@ -383,7 +428,7 @@ export function spawnInstalledSetupRefresh(
   cwd: string,
   spawnProcess: SpawnSyncLike = spawnSync,
 ): RunSetupRefreshResult {
-  const result = spawnProcess(process.execPath, [cliEntry, 'setup'], {
+  const result = spawnProcess(process.execPath, [cliEntry, ...resolveSetupRefreshArgs(cwd)], {
     cwd,
     env: process.env,
     stdio: 'inherit',
