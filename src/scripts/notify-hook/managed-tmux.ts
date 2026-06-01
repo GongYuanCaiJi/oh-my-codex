@@ -58,13 +58,10 @@ export function resolvePayloadSessionId(payload: any): string {
 }
 
 export function resolveInvocationSessionId(payload: any): string {
-  return safeString(
-    resolvePayloadSessionId(payload)
-    || process.env.OMX_SESSION_ID
-    || process.env.CODEX_SESSION_ID
-    || process.env.SESSION_ID
-    || '',
-  ).trim();
+  // Managed tmux ownership is an authority decision for this hook turn.
+  // Only explicit native-hook payload identity may authorize it; inherited
+  // process env ids are ambient hints and must not select panes/sessions.
+  return resolvePayloadSessionId(payload);
 }
 
 function readNativeSessionId(sessionState: { native_session_id?: unknown; codex_session_id?: unknown }): string {
@@ -73,6 +70,26 @@ function readNativeSessionId(sessionState: { native_session_id?: unknown; codex_
 
 function readAuthoritativeTmuxSessionName(sessionState: { tmux_session_name?: unknown; tmuxSessionName?: unknown }): string {
   return safeString(sessionState.tmux_session_name || sessionState.tmuxSessionName || '').trim();
+}
+
+function buildAcceptableTmuxInstanceIds(canonicalSessionId: string, nativeSessionId: string): Set<string> {
+  // Tmux tags describe OMX instance ownership, not merely the native hook
+  // identity for this turn. Prefer canonical OMX ids; accept native aliases
+  // only for legacy panes that were tagged before the identity split.
+  return new Set([canonicalSessionId, nativeSessionId].filter(Boolean));
+}
+
+function isAcceptableTmuxInstanceId(instanceId: string, acceptableIds: Set<string>): boolean {
+  const normalized = safeString(instanceId).trim();
+  return normalized !== '' && acceptableIds.has(normalized);
+}
+
+async function resolveTaggedTmuxSessionNameForIds(acceptableIds: Set<string>): Promise<{ taggedTmuxSessionName: string; taggedTmuxInstanceId: string }> {
+  for (const instanceId of acceptableIds) {
+    const taggedTmuxSessionName = await resolveTmuxSessionForInstance(instanceId);
+    if (taggedTmuxSessionName) return { taggedTmuxSessionName, taggedTmuxInstanceId: instanceId };
+  }
+  return { taggedTmuxSessionName: '', taggedTmuxInstanceId: '' };
 }
 
 function readCurrentTmuxSessionName(): string {
@@ -227,12 +244,15 @@ export async function resolveManagedSessionContext(
       );
     const currentTmuxSessionName = readCurrentTmuxSessionName();
     const currentTmuxPaneTarget = safeString(paneTarget || process.env.TMUX_PANE || '').trim();
+    const acceptableTmuxInstanceIds = buildAcceptableTmuxInstanceIds(canonicalSessionId, nativeSessionId);
     const currentTmuxPaneInstanceId = currentTmuxPaneTarget ? await readTmuxPaneInstanceId(currentTmuxPaneTarget) : '';
-    if (currentTmuxPaneInstanceId && currentTmuxPaneInstanceId !== invocationSessionId) {
+    if (currentTmuxPaneInstanceId && !isAcceptableTmuxInstanceId(currentTmuxPaneInstanceId, acceptableTmuxInstanceIds)) {
       return {
         managed: false,
         reason: 'pane_instance_mismatch',
         invocationSessionId,
+        canonicalSessionId,
+        nativeSessionId,
         sessionState,
         expectedTmuxSessionName,
         currentTmuxSessionName,
@@ -241,11 +261,14 @@ export async function resolveManagedSessionContext(
         taggedTmuxSessionName: '',
       };
     }
-    if (currentTmuxPaneInstanceId === invocationSessionId) {
+    if (isAcceptableTmuxInstanceId(currentTmuxPaneInstanceId, acceptableTmuxInstanceIds)) {
       return {
         managed: true,
         reason: 'tmux_pane_instance_match',
         invocationSessionId,
+        canonicalSessionId,
+        nativeSessionId,
+        tmuxOwnerSessionId: canonicalSessionId,
         sessionState,
         expectedTmuxSessionName,
         currentTmuxSessionName,
@@ -256,11 +279,13 @@ export async function resolveManagedSessionContext(
     }
 
     const currentTmuxInstanceId = currentTmuxSessionName ? await readTmuxSessionInstanceId(currentTmuxSessionName) : '';
-    if (currentTmuxInstanceId && currentTmuxInstanceId !== invocationSessionId) {
+    if (currentTmuxInstanceId && !isAcceptableTmuxInstanceId(currentTmuxInstanceId, acceptableTmuxInstanceIds)) {
       return {
         managed: false,
         reason: 'tmux_instance_mismatch',
         invocationSessionId,
+        canonicalSessionId,
+        nativeSessionId,
         sessionState,
         expectedTmuxSessionName,
         currentTmuxSessionName,
@@ -268,12 +293,15 @@ export async function resolveManagedSessionContext(
         taggedTmuxSessionName: '',
       };
     }
-    if (currentTmuxInstanceId === invocationSessionId) {
+    if (isAcceptableTmuxInstanceId(currentTmuxInstanceId, acceptableTmuxInstanceIds)) {
       if (currentTmuxPaneTarget) warnPaneInstanceFallback(currentTmuxPaneTarget);
       return {
         managed: true,
         reason: 'tmux_instance_match',
         invocationSessionId,
+        canonicalSessionId,
+        nativeSessionId,
+        tmuxOwnerSessionId: canonicalSessionId,
         sessionState,
         expectedTmuxSessionName,
         currentTmuxSessionName,
@@ -284,16 +312,20 @@ export async function resolveManagedSessionContext(
       };
     }
 
-    const taggedTmuxSessionName = await resolveTmuxSessionForInstance(invocationSessionId);
+    const { taggedTmuxSessionName, taggedTmuxInstanceId } = await resolveTaggedTmuxSessionNameForIds(acceptableTmuxInstanceIds);
     if (taggedTmuxSessionName) {
       return {
         managed: true,
         reason: 'tmux_instance_tag_match',
         invocationSessionId,
+        canonicalSessionId,
+        nativeSessionId,
+        tmuxOwnerSessionId: canonicalSessionId,
         sessionState,
         expectedTmuxSessionName,
         currentTmuxSessionName,
         taggedTmuxSessionName,
+        taggedTmuxInstanceId,
       };
     }
 
@@ -304,6 +336,7 @@ export async function resolveManagedSessionContext(
         invocationSessionId,
         canonicalSessionId,
         nativeSessionId,
+        tmuxOwnerSessionId: canonicalSessionId,
         sessionState,
         expectedTmuxSessionName,
         currentTmuxSessionName,
@@ -330,6 +363,7 @@ export async function resolveManagedSessionContext(
         invocationSessionId,
         canonicalSessionId,
         nativeSessionId,
+        tmuxOwnerSessionId: canonicalSessionId,
         sessionState,
         expectedTmuxSessionName,
         currentTmuxSessionName: '',
@@ -394,12 +428,15 @@ export async function verifyManagedPaneTarget(paneId: string, cwd: string, paylo
     }
     const paneInstanceId = await readTmuxPaneInstanceId(paneTarget);
     const sessionInstanceId = paneInstanceId ? '' : await readTmuxSessionInstanceId(paneSessionName);
-    if (paneInstanceId && paneInstanceId !== managedContext.invocationSessionId) {
+    const canonicalSessionId = safeString(managedContext.canonicalSessionId || managedContext.sessionState?.session_id).trim();
+    const nativeSessionId = safeString(managedContext.nativeSessionId || managedContext.sessionState?.native_session_id || managedContext.sessionState?.codex_session_id).trim();
+    const acceptableTmuxInstanceIds = buildAcceptableTmuxInstanceIds(canonicalSessionId, nativeSessionId);
+    if (paneInstanceId && !isAcceptableTmuxInstanceId(paneInstanceId, acceptableTmuxInstanceIds)) {
       return { ok: false, reason: 'pane_instance_mismatch', paneTarget, paneSessionName, paneInstanceId, managedContext };
     }
     if (!paneInstanceId && sessionInstanceId) {
       warnPaneInstanceFallback(paneTarget);
-      if (sessionInstanceId !== managedContext.invocationSessionId) {
+      if (!isAcceptableTmuxInstanceId(sessionInstanceId, acceptableTmuxInstanceIds)) {
         return {
           ok: false,
           reason: 'pane_instance_mismatch',

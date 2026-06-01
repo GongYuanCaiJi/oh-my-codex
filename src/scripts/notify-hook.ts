@@ -380,7 +380,9 @@ async function main() {
   if (!(await isOmxManagedCwd(cwd))) {
     process.exit(0);
   }
-  const payloadSessionId = safeString(payload.session_id || payload['session-id'] || '');
+  // Codex notify payload `session_id` is native/Codex identity. OMX state
+  // scope remains `currentOmxSessionId` when usable session metadata exists.
+  const payloadNativeSessionId = safeString(payload.session_id || payload['session-id'] || '');
   const payloadThreadId = safeString(payload['thread-id'] || payload.thread_id || '');
   const inputMessages = normalizeInputMessages(payload);
   const latestUserInput = safeString(inputMessages.length > 0 ? inputMessages[inputMessages.length - 1] : '');
@@ -400,7 +402,7 @@ async function main() {
   const logsDir = join(cwd, '.omx', 'logs');
   const omxDir = join(cwd, '.omx');
   let currentOmxSessionId = '';
-  const getEffectiveSessionId = () => currentOmxSessionId || payloadSessionId;
+  const getEffectiveSessionId = () => currentOmxSessionId || payloadNativeSessionId;
 
   // Ensure directories exist
   await mkdir(logsDir, { recursive: true }).catch(() => {});
@@ -521,7 +523,7 @@ async function main() {
     try {
       const resumeResult = await reconcileRalphSessionResume({
         stateDir,
-        payloadSessionId,
+        payloadSessionId: payloadNativeSessionId,
         payloadThreadId,
         cwd,
       });
@@ -532,7 +534,7 @@ async function main() {
           type: 'ralph_session_resume',
           reason: resumeResult.reason,
           current_omx_session_id: resumeResult.currentOmxSessionId || null,
-          payload_codex_session_id: payloadSessionId || null,
+          payload_codex_session_id: payloadNativeSessionId || null,
           source_path: resumeResult.sourcePath || null,
           target_path: resumeResult.targetPath || null,
           owner_updated: resumeResult.updatedCurrentOwner,
@@ -544,7 +546,7 @@ async function main() {
         timestamp: new Date().toISOString(),
         level: 'warn',
         type: 'ralph_session_resume_failure',
-        payload_codex_session_id: payloadSessionId || null,
+        payload_codex_session_id: payloadNativeSessionId || null,
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -818,7 +820,7 @@ async function main() {
       type: safeString(payload.type || 'agent-turn-complete'),
       input_messages: normalizeInputMessages(payload),
       output_preview: outputPreview,
-      native_session_id: payloadSessionId || null,
+      native_session_id: payloadNativeSessionId || null,
       omx_session_id: sessionIdForHooks || null,
       ...readRepositoryMetadata(cwd),
       session_name: resolveOperationalSessionName(cwd, sessionIdForHooks),
@@ -841,7 +843,7 @@ async function main() {
         status: signal.normalized_event,
         errorSummary: signal.error_summary,
         extra: {
-          native_session_id: payloadSessionId || null,
+          native_session_id: payloadNativeSessionId || null,
           omx_session_id: sessionIdForHooks || null,
           source_event: safeString(payload.type || 'agent-turn-complete'),
         },

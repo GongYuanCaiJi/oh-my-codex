@@ -15,6 +15,7 @@ import {
   pruneRecentKeys,
   getScopedStateDirsForCurrentSession,
   readCurrentSessionId,
+  resolveSessionIdForStateDir,
   readdir,
 } from './state-io.js';
 import { runProcess } from './process-runner.js';
@@ -203,12 +204,17 @@ export async function readVisibleAllowedModes(
   preferredMode: string | null;
   sessionScoped: boolean;
 }> {
+  const payloadNativeSessionId = resolvePayloadSessionId(payload);
   const candidateSessionIds = [
+    // Payload session ids are explicit native-hook identity for this turn.
+    // Canonicalize through usable session metadata before reading OMX scoped
+    // state; the raw payload id is only a no-metadata fallback.
+    await resolveSessionIdForStateDir(stateDir, payloadNativeSessionId, cwd).catch(() => payloadNativeSessionId),
     await readCurrentSessionId(stateDir, cwd).catch(() => undefined),
-    resolvePayloadSessionId(payload),
   ]
     .map((value) => safeString(value).trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index);
 
   for (const sessionId of candidateSessionIds) {
     const canonicalState = await readVisibleSkillActiveStateForStateDir(stateDir, sessionId);
@@ -290,7 +296,7 @@ export async function resolveSessionToPane(sessionName: any): Promise<string | n
 }
 
 export async function resolvePaneTarget(target: any, expectedCwd: any, modePane: any, cwd: string, payload: any): Promise<any> {
-  const requiresManagedOwnership = safeString(cwd).trim() !== '' && safeString(payload?.session_id || payload?.['session-id'] || process.env.OMX_SESSION_ID || '').trim() !== '';
+  const requiresManagedOwnership = safeString(cwd).trim() !== '';
   const managedContext = requiresManagedOwnership
     ? await resolveManagedSessionContext(cwd, payload, { allowTeamWorker: false })
     : { managed: false, reason: 'not_required', invocationSessionId: '', sessionState: null, expectedTmuxSessionName: '', currentTmuxSessionName: '' };

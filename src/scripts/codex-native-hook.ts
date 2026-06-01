@@ -180,6 +180,86 @@ function safeObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }
 
+function hasProcessIdentityMetadata(state: SessionState | null): boolean {
+  return Boolean(
+    state
+    && (
+      (Number.isInteger(state.pid) && Number(state.pid) > 0)
+      || typeof state.pid_start_ticks === "number"
+      || typeof state.pid_cmdline === "string"
+    ),
+  );
+}
+
+function parseLinuxStartTicksFromStat(statContent: string): number | undefined {
+  const commandEnd = statContent.lastIndexOf(")");
+  if (commandEnd === -1) return undefined;
+  const fields = statContent.slice(commandEnd + 1).trim().split(/\s+/);
+  if (fields.length <= 19) return undefined;
+  const startTicks = Number(fields[19]);
+  return Number.isFinite(startTicks) ? startTicks : undefined;
+}
+
+function readPromptSessionProcessIdentity(pid: number): { pid_start_ticks?: number; pid_cmdline?: string } {
+  if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 0) return {};
+  const identity: { pid_start_ticks?: number; pid_cmdline?: string } = {};
+  try {
+    const startTicks = parseLinuxStartTicksFromStat(readFileSync(`/proc/${pid}/stat`, "utf-8"));
+    if (typeof startTicks === "number") identity.pid_start_ticks = startTicks;
+  } catch {}
+  try {
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8")
+      .replace(/\u0000+/g, " ")
+      .trim();
+    if (cmdline) identity.pid_cmdline = cmdline;
+  } catch {}
+  return identity;
+}
+
+async function reconcilePromptSubmitSessionAuthority(
+  cwd: string,
+  stateDir: string,
+  nativeSessionId: string,
+  pid: number,
+): Promise<SessionState> {
+  const sessionPath = join(stateDir, "session.json");
+  const existing = await readFile(sessionPath, "utf-8")
+    .then((content) => JSON.parse(content) as SessionState)
+    .catch(() => null);
+  const existingNativeSessionId = safeString(existing?.native_session_id).trim();
+  const sameNative = existingNativeSessionId === nativeSessionId;
+  const nowIso = new Date().toISOString();
+  const sessionId = sameNative && safeString(existing?.session_id).trim()
+    ? safeString(existing?.session_id).trim()
+    : nativeSessionId;
+  const previousNativeSessionId = existingNativeSessionId && existingNativeSessionId !== nativeSessionId
+    ? existingNativeSessionId
+    : safeString(existing?.previous_native_session_id).trim();
+  const ownerOmxSessionId = sameNative ? safeString(existing?.owner_omx_session_id).trim() : "";
+  const state: SessionState = {
+    session_id: sessionId,
+    native_session_id: nativeSessionId,
+    ...(previousNativeSessionId ? { previous_native_session_id: previousNativeSessionId } : {}),
+    ...(previousNativeSessionId && previousNativeSessionId !== existing?.previous_native_session_id ? { native_session_switched_at: nowIso } : {}),
+    ...(ownerOmxSessionId ? { owner_omx_session_id: ownerOmxSessionId } : {}),
+    started_at: sameNative && safeString(existing?.started_at).trim() ? safeString(existing?.started_at).trim() : nowIso,
+    cwd,
+    pid,
+    platform: process.platform,
+    ...readPromptSessionProcessIdentity(pid),
+  };
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(sessionPath, JSON.stringify(state, null, 2));
+  appendToLog(cwd, {
+    event: sameNative ? "session_start_reconciled" : "session_start",
+    session_id: state.session_id,
+    native_session_id: nativeSessionId,
+    pid,
+    timestamp: nowIso,
+  }).catch(() => {});
+  return state;
+}
+
 function resolveHudReconcileSessionId(
   currentSessionState: SessionState | null,
   canonicalSessionId: string | null,
@@ -4152,20 +4232,27 @@ export async function dispatchCodexNativeHook(
     (isSubagentSessionStart || isSubagentStop)
     && shouldSuppressSubagentLifecycleHookDispatch();
 
-  if (hookEventName === "UserPromptSubmit" && nativeSessionId && !canonicalSessionId && !isSubagentPromptSubmit) {
+  if (hookEventName === "UserPromptSubmit" && nativeSessionId && !isSubagentPromptSubmit) {
     const prompt = readPromptText(payload);
     const match = prompt ? detectPrimaryKeyword(prompt) : null;
-    if (match?.skill !== "team") {
-      canonicalSessionId = nativeSessionId;
-      resolvedNativeSessionId = nativeSessionId;
+    const currentNativeSessionId = safeString(currentSessionState?.native_session_id).trim();
+    const currentCanonicalSessionId = safeString(currentSessionState?.session_id).trim();
+    const currentSessionMatchesPayload =
+      currentCanonicalSessionId === nativeSessionId
+      || currentNativeSessionId === nativeSessionId;
+    const shouldRepairPromptSessionAuthority = !canonicalSessionId
+      || (!hasProcessIdentityMetadata(currentSessionState) && !currentSessionMatchesPayload);
+    if (match?.skill !== "team" && shouldRepairPromptSessionAuthority) {
+      const sessionState = await reconcilePromptSubmitSessionAuthority(
+        cwd,
+        stateDir,
+        nativeSessionId,
+        options.sessionOwnerPid ?? resolveSessionOwnerPid(payload),
+      );
+      canonicalSessionId = safeString(sessionState.session_id).trim() || nativeSessionId;
+      resolvedNativeSessionId = safeString(sessionState.native_session_id).trim() || nativeSessionId;
       eventSessionId = canonicalSessionId || nativeSessionId || undefined;
       sessionIdForState = canonicalSessionId || nativeSessionId;
-      await writeFile(join(stateDir, "session.json"), JSON.stringify({
-        session_id: canonicalSessionId,
-        native_session_id: nativeSessionId,
-        started_at: new Date().toISOString(),
-        cwd,
-      }, null, 2)).catch(() => {});
     }
   }
 

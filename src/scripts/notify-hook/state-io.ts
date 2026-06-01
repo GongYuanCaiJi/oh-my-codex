@@ -101,6 +101,20 @@ export async function readCurrentSessionId(baseStateDir: string, cwd?: string): 
   return resolveImplicitSessionId(metadata);
 }
 
+export async function resolveSessionIdForStateDir(
+  baseStateDir: string,
+  explicitSessionId?: string,
+  cwd?: string,
+): Promise<string | undefined> {
+  const normalizedExplicit = typeof explicitSessionId === 'string' && explicitSessionId.trim()
+    ? explicitSessionId.trim()
+    : undefined;
+  const validatedExplicit = validateSessionId(normalizedExplicit);
+  if (!validatedExplicit) return undefined;
+  const metadata = await readSessionMetadataFromBaseStateDir(baseStateDir, cwd);
+  return resolveExplicitSessionId(validatedExplicit, metadata);
+}
+
 export async function resolveScopedStateDir(
   baseStateDir: string,
   explicitSessionId?: string,

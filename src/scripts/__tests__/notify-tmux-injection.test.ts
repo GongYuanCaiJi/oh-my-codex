@@ -130,6 +130,110 @@ describe('notify-hook tmux injection canonical skill gating', () => {
     }
   });
 
+  it('prefers explicit payload session modes over usable current session metadata', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-notify-tmux-payload-first-'));
+    try {
+      const stateDir = join(wd, '.omx', 'state');
+      const currentSessionId = 'sess-current';
+      const payloadSessionId = 'sess-payload';
+      await mkdir(join(stateDir, 'sessions', currentSessionId), { recursive: true });
+      await mkdir(join(stateDir, 'sessions', payloadSessionId), { recursive: true });
+      await writeFile(
+        join(stateDir, 'session.json'),
+        JSON.stringify({ session_id: currentSessionId, cwd: wd }, null, 2),
+        'utf-8',
+      );
+      await writeFile(
+        join(stateDir, 'sessions', currentSessionId, 'skill-active-state.json'),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'ralplan',
+          active_skills: [{ skill: 'ralplan', active: true, session_id: currentSessionId }],
+        }, null, 2),
+        'utf-8',
+      );
+      await writeFile(
+        join(stateDir, 'sessions', payloadSessionId, 'skill-active-state.json'),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'deep-interview',
+          active_skills: [{ skill: 'deep-interview', active: true, session_id: payloadSessionId }],
+        }, null, 2),
+        'utf-8',
+      );
+
+      const visible = await readVisibleAllowedModes(
+        wd,
+        stateDir,
+        { session_id: payloadSessionId },
+        ['ralplan', 'deep-interview'],
+      );
+
+      assert.equal(visible.canonicalPresent, true);
+      assert.equal(visible.sessionScoped, true);
+      assert.equal(visible.preferredMode, 'deep-interview');
+      assert.deepEqual([...visible.allowedSet ?? []], ['deep-interview']);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('canonicalizes payload native aliases before reading visible modes', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-notify-tmux-payload-alias-canonical-'));
+    try {
+      const stateDir = join(wd, '.omx', 'state');
+      const canonicalSessionId = 'sess-canonical';
+      const nativePayloadSessionId = 'codex-native';
+      await mkdir(join(stateDir, 'sessions', canonicalSessionId), { recursive: true });
+      await mkdir(join(stateDir, 'sessions', nativePayloadSessionId), { recursive: true });
+      await writeFile(
+        join(stateDir, 'session.json'),
+        JSON.stringify({
+          session_id: canonicalSessionId,
+          native_session_id: nativePayloadSessionId,
+          cwd: wd,
+        }, null, 2),
+        'utf-8',
+      );
+      await writeFile(
+        join(stateDir, 'sessions', canonicalSessionId, 'skill-active-state.json'),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'ralplan',
+          active_skills: [{ skill: 'ralplan', active: true, session_id: canonicalSessionId }],
+        }, null, 2),
+        'utf-8',
+      );
+      await writeFile(
+        join(stateDir, 'sessions', nativePayloadSessionId, 'skill-active-state.json'),
+        JSON.stringify({
+          version: 1,
+          active: true,
+          skill: 'deep-interview',
+          active_skills: [{ skill: 'deep-interview', active: true, session_id: nativePayloadSessionId }],
+        }, null, 2),
+        'utf-8',
+      );
+
+      const visible = await readVisibleAllowedModes(
+        wd,
+        stateDir,
+        { session_id: nativePayloadSessionId },
+        ['ralplan', 'deep-interview'],
+      );
+
+      assert.equal(visible.canonicalPresent, true);
+      assert.equal(visible.sessionScoped, true);
+      assert.equal(visible.preferredMode, 'ralplan');
+      assert.deepEqual([...visible.allowedSet ?? []], ['ralplan']);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it('does not treat inherited OMX_SESSION_ID as a visible mode session without usable metadata', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-notify-tmux-env-session-'));
     const previousOmxSessionId = process.env.OMX_SESSION_ID;

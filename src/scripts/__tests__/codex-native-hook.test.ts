@@ -995,6 +995,92 @@ describe("codex native hook dispatch", () => {
     }
   });
 
+  it("reconciles UserPromptSubmit fallback through canonical session lifecycle metadata", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-prompt-reconcile-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      const oldNativeSessionId = "codex-native-old";
+      const newNativeSessionId = "codex-native-new";
+      await writeJson(join(stateDir, "session.json"), {
+        session_id: oldNativeSessionId,
+        native_session_id: oldNativeSessionId,
+        started_at: "2026-04-10T00:00:00.000Z",
+        cwd,
+      });
+      await mkdir(join(stateDir, "sessions", oldNativeSessionId), { recursive: true });
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "UserPromptSubmit",
+          cwd,
+          session_id: newNativeSessionId,
+          thread_id: "thread-prompt-reconcile",
+          turn_id: "turn-prompt-reconcile",
+          prompt: "$ralplan fix stale prompt fallback",
+        },
+        {
+          cwd,
+          sessionOwnerPid: process.pid,
+        },
+      );
+
+      assert.equal(result.omxEventName, "keyword-detector");
+      const sessionState = JSON.parse(
+        await readFile(join(stateDir, "session.json"), "utf-8"),
+      ) as { session_id?: string; native_session_id?: string; pid?: number; platform?: string };
+      assert.equal(sessionState.session_id, newNativeSessionId);
+      assert.equal(sessionState.native_session_id, newNativeSessionId);
+      assert.equal(sessionState.pid, process.pid);
+      assert.equal(sessionState.platform, process.platform);
+      assert.equal(existsSync(join(stateDir, "sessions", newNativeSessionId, "skill-active-state.json")), true);
+      assert.equal(existsSync(join(stateDir, "sessions", oldNativeSessionId, "skill-active-state.json")), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles legacy no-native UserPromptSubmit fallback without preserving stale authority", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-prompt-reconcile-legacy-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      const oldNativeSessionId = "codex-native-old";
+      const newNativeSessionId = "codex-native-new";
+      await writeJson(join(stateDir, "session.json"), {
+        session_id: oldNativeSessionId,
+        started_at: "2026-04-10T00:00:00.000Z",
+        cwd,
+      });
+      await mkdir(join(stateDir, "sessions", oldNativeSessionId), { recursive: true });
+
+      await dispatchCodexNativeHook(
+        {
+          hook_event_name: "UserPromptSubmit",
+          cwd,
+          session_id: newNativeSessionId,
+          thread_id: "thread-prompt-reconcile-legacy",
+          turn_id: "turn-prompt-reconcile-legacy",
+          prompt: "$ralplan fix legacy no-native stale fallback",
+        },
+        {
+          cwd,
+          sessionOwnerPid: process.pid,
+        },
+      );
+
+      const sessionState = JSON.parse(
+        await readFile(join(stateDir, "session.json"), "utf-8"),
+      ) as { session_id?: string; native_session_id?: string; pid?: number; platform?: string };
+      assert.equal(sessionState.session_id, newNativeSessionId);
+      assert.equal(sessionState.native_session_id, newNativeSessionId);
+      assert.equal(sessionState.pid, process.pid);
+      assert.equal(sessionState.platform, process.platform);
+      assert.equal(existsSync(join(stateDir, "sessions", newNativeSessionId, "skill-active-state.json")), true);
+      assert.equal(existsSync(join(stateDir, "sessions", oldNativeSessionId, "skill-active-state.json")), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("preserves canonical OMX session scope when native SessionStart arrives with a different id", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-session-reconcile-"));
     try {
