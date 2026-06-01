@@ -8,6 +8,21 @@ import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 import { reconcileRalphSessionResume } from '../../scripts/notify-hook/ralph-session-resume.js';
 
+const INHERITED_NOTIFY_HOOK_ENV_KEYS = [
+  'CODEX_SESSION_ID',
+  'OMX_ROOT',
+  'OMX_SESSION_ID',
+  'OMX_SOURCE_CWD',
+  'OMX_STARTUP_CWD',
+  'OMX_STATE_ROOT',
+  'OMX_TEAM_INTERNAL_WORKER',
+  'OMX_TEAM_STATE_ROOT',
+  'OMX_TEAM_WORKER',
+  'SESSION_ID',
+  'TMUX',
+  'TMUX_PANE',
+] as const;
+
 function notifyHookRepoRoot(): string {
   const testDir = dirname(fileURLToPath(import.meta.url));
   return join(testDir, '..', '..', '..');
@@ -22,9 +37,7 @@ function runNotifyHook(
     encoding: 'utf-8',
     env: {
       ...process.env,
-      OMX_TEAM_WORKER: '',
-      TMUX: '',
-      TMUX_PANE: '',
+      ...Object.fromEntries(INHERITED_NOTIFY_HOOK_ENV_KEYS.map((key) => [key, ''])),
       ...envOverrides,
     },
   });
@@ -171,10 +184,6 @@ describe('notify-hook Ralph session resume', () => {
           input_messages: ['ordinary native subagent turn'],
         }),
         {
-          OMX_ROOT: '',
-          OMX_STATE_ROOT: '',
-          OMX_TEAM_STATE_ROOT: '',
-          OMX_SESSION_ID: '',
           OMX_NOTIFY_HOOK_TRUSTED_MANAGED_CWD: wd,
         },
       );

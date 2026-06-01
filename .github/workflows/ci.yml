@@ -422,10 +422,6 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y build-essential tmux
           fi
-      - name: Setup Rust for harness-backed Node tests
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
