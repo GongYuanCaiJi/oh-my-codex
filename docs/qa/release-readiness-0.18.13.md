@@ -11,7 +11,7 @@
 
 ## Evidence lifecycle
 
-This file is the pre-tag release-prep readiness record for the `0.18.13` candidate. After PR CI, dev/main promotion, tag workflow, GitHub release creation, and npm publication, append or supersede the pending CI/publication checklist items rather than rewriting local prep evidence as publication proof.
+This file began as the pre-tag release-prep readiness record for the `0.18.13` candidate. `v0.18.13` has now shipped from commit `daf7c7c21f602584294f9a04ef5155b5ccfb0e96`; the post-publish evidence below is a deliberate docs-only update after the immutable release tag.
 
 ## Release scope
 
@@ -83,34 +83,23 @@ Commands are run from `/Users/bellman/Documents/Workspace/oh-my-codex` on branch
 
 ## CI / publication evidence
 
-- [ ] Release-prep PR CI green — pending after PR/push.
-- [ ] Dev/main promotion CI green — pending after merge/promotion.
-- [ ] Tag-triggered release workflow — pending after `v0.18.13` tag push.
-- [ ] GitHub release proof — pending.
-- [ ] npm proof — pending.
+- [x] Release-prep `dev` CI green — PASS, run `27674248675` on `b619f5a0705f86243efc28232a8d952139746164`, <https://github.com/Yeachan-Heo/oh-my-codex/actions/runs/27674248675>.
+- [x] Dev/main promotion CI green — PASS, run `27674657459` on `daf7c7c21f602584294f9a04ef5155b5ccfb0e96`, <https://github.com/Yeachan-Heo/oh-my-codex/actions/runs/27674657459>.
+- [x] Tag-triggered release workflow — PASS, run `27674982310` for `v0.18.13` on `daf7c7c21f602584294f9a04ef5155b5ccfb0e96`, <https://github.com/Yeachan-Heo/oh-my-codex/actions/runs/27674982310>.
+- [x] GitHub release proof — PASS, `gh release view v0.18.13` reports a non-draft, non-prerelease release at <https://github.com/Yeachan-Heo/oh-my-codex/releases/tag/v0.18.13> with `57` assets, including `native-release-manifest.json`.
+- [x] npm proof — PASS, `npm view oh-my-codex version` returned `0.18.13` after the release workflow published with provenance.
 
 ## Current readiness verdict
 
-Local release verification and dogfooding for `0.18.13` are complete for release-prep handoff. The release is not publication-ready until PR CI, dev/main promotion, tag workflow, GitHub release proof, and npm proof gates complete.
+`0.18.13` is shipped. The release tag points at `daf7c7c21f602584294f9a04ef5155b5ccfb0e96`; GitHub release assets are published; npm reports `oh-my-codex@0.18.13`.
 
 ## Release handoff
 
-Local release-prep evidence is complete for `0.18.13`. The following local artifacts are the authoritative handoff bundle:
+Release execution is complete for `0.18.13`. The following evidence forms the shipped-release bundle:
 
 - Release collateral: `CHANGELOG.md`, `RELEASE_BODY.md`, `docs/release-notes-0.18.13.md`, and this readiness file.
 - Version/package metadata: `package.json`, `package-lock.json`, `Cargo.toml`, `Cargo.lock`, `plugins/oh-my-codex/.codex-plugin/plugin.json`, `src/catalog/generated/public-catalog.json`, and `templates/catalog-manifest.json`.
-- Verification logs: `artifacts/release-0.18.13/logs/build.log`, `version-sync.log`, `verify-native-agents.log`, `verify-plugin-bundle.log`, `catalog-docs-check.log`, `no-unused.log`, `focused-release-tests.log`, `test-ci-compiled-rerun.log`, `npm-pack-dry-run.log`, `npm-pack-dry-run-json.log`, `git-diff-check-final.log`, `cli-dogfood.log`, `package-dogfood.log`, and `smoke-packed-install.log`.
+- Local verification logs: `artifacts/release-0.18.13/logs/build.log`, `version-sync.log`, `verify-native-agents.log`, `verify-plugin-bundle.log`, `catalog-docs-check.log`, `no-unused.log`, `focused-release-tests.log`, `test-ci-compiled-rerun.log`, `npm-pack-dry-run.log`, `npm-pack-dry-run-json.log`, `git-diff-check-final.log`, `cli-dogfood.log`, `package-dogfood.log`, and `smoke-packed-install.log`.
+- Remote release proof: dev CI run `27674248675`, main CI run `27674657459`, release workflow run `27674982310`, GitHub release `v0.18.13`, and npm registry version `0.18.13`.
 
-Remaining irreversible or external release actions require maintainer execution or explicit approval after review of this handoff:
-
-1. Push/open the release-prep branch or PR containing the `0.18.13` artifacts.
-2. Wait for release-prep PR CI to pass.
-3. Promote/merge through the repository's dev/main release flow and wait for promotion CI to pass.
-4. Create and push the release tag only after promotion approval:
-   ```sh
-   git tag -a v0.18.13 -m "v0.18.13"
-   git push origin v0.18.13
-   ```
-5. Wait for the tag-triggered GitHub release workflow and native asset manifest to pass.
-6. Publish to npm through the repository's approved manual npm publication workflow, not from this local session.
-7. Append GitHub release proof and npm proof to this readiness file after publication completes.
+Known gaps / pending gates: none for the shipped `v0.18.13` tag. This post-publish readiness update intentionally documents evidence after the release tag rather than moving the tag.
