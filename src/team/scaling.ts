@@ -24,7 +24,6 @@ import {
   buildWorkerStartupCommand,
   trustWorkerMiseConfigIfAvailable,
   writeWorkerStartupScriptCommand,
-  resolveTeamWorkerCliPlan,
   tagPaneTeamOwner,
 } from './tmux-session.js';
 import { execFileSync, spawnSync } from 'child_process';
@@ -69,8 +68,11 @@ import {
   resolveTeamWorkerLaunchArgs,
   resolveAgentDefaultModel,
   resolveAgentReasoningEffort,
+  shouldHonorAgentExactModel,
+  TEAM_WORKER_INHERITED_MODEL_ENV,
   type TeamReasoningEffort,
 } from './model-contract.js';
+import { resolveTeamWorkerCliForResolvedLaunchArgs } from './runtime.js';
 import { resolveCanonicalTeamStateRoot } from './state-root.js';
 import {
   ensureWorktree,
@@ -277,6 +279,7 @@ export async function scaleUp(
 
     const maxWorkers = config.max_workers;
     const currentCount = config.workers.length;
+    const targetWorkerCount = currentCount + count;
     if (currentCount + count > maxWorkers) {
       return {
         ok: false,
@@ -396,10 +399,6 @@ export async function scaleUp(
     }
     const persistedTasks = await listTasks(sanitized, leaderCwd);
 
-    // Resolve shared worker launch args for CLI selection.
-    const sharedWorkerLaunchArgs = resolveWorkerLaunchArgsForScaling(launchEnv, agentType, undefined, codexHomeOverride);
-    const workerCliPlan = resolveTeamWorkerCliPlan(count, sharedWorkerLaunchArgs, launchEnv);
-
     for (let i = 0; i < count; i++) {
       const workerIndex = nextIndex;
       nextIndex++;
@@ -439,6 +438,7 @@ export async function scaleUp(
       const preferredReasoning = resolveAgentReasoningEffort(runtimeRole, codexHomeOverride)
         ?? resolveAgentReasoningEffort(agentType, codexHomeOverride);
       const workerLaunchArgs = resolveWorkerLaunchArgsForScaling(launchEnv, runtimeRole, preferredReasoning, codexHomeOverride);
+      const workerCli = resolveTeamWorkerCliForResolvedLaunchArgs(workerIndex, targetWorkerCount, workerLaunchArgs, launchEnv);
       const resolvedWorkerModel = parseTeamWorkerLaunchArgs(workerLaunchArgs).modelOverride ?? undefined;
       const rolePromptContent = rawRolePromptContent
         ? composeRoleInstructionsForRole(runtimeRole, rawRolePromptContent, resolvedWorkerModel)
@@ -477,7 +477,7 @@ export async function scaleUp(
         workerLaunchArgs,
         workerCwd,
         extraEnv,
-        workerCliPlan[i],
+        workerCli,
         undefined,
         runtimeRole,
       ) ?? buildWorkerStartupCommand(
@@ -486,7 +486,7 @@ export async function scaleUp(
         workerLaunchArgs,
         workerCwd,
         extraEnv,
-        workerCliPlan[i],
+        workerCli,
         undefined,
         runtimeRole,
       );
@@ -539,7 +539,7 @@ export async function scaleUp(
         name: workerName,
         index: workerIndex,
         role: workerRole,
-        worker_cli: workerCliPlan[i],
+        worker_cli: workerCli,
         assigned_tasks: [],
         pid: panePid ?? undefined,
         pane_id: paneId,
@@ -598,7 +598,7 @@ export async function scaleUp(
           if (dispatchPolicy.dispatch_mode === 'hook_preferred_with_fallback') {
             return { ok: true, transport: 'hook', reason: 'queued_for_hook_dispatch' };
           }
-          return await notifyWorkerPaneOutcome(sessionName, workerIndex, message, paneId, workerCliPlan[i]);
+          return await notifyWorkerPaneOutcome(sessionName, workerIndex, message, paneId, workerCli);
         },
       });
       let outcome = queued;
@@ -610,7 +610,7 @@ export async function scaleUp(
         if (receipt && (receipt.status === 'notified' || receipt.status === 'delivered')) {
           outcome = { ok: true, transport: 'hook', reason: `hook_receipt_${receipt.status}`, request_id: queued.request_id };
         } else {
-          const fallback = await notifyWorkerPaneOutcome(sessionName, workerIndex, triggerDirective.text, paneId, workerCliPlan[i]);
+          const fallback = await notifyWorkerPaneOutcome(sessionName, workerIndex, triggerDirective.text, paneId, workerCli);
           if (receipt?.status === 'failed') {
             if (fallback.ok) {
               await transitionDispatchRequest(
@@ -690,7 +690,7 @@ export async function scaleUp(
       // Retry dispatch once if a trust prompt is blocking the worker pane (fixes #393).
       if (!outcome.ok && dismissTrustPromptIfPresent(sessionName, workerIndex, paneId)) {
         waitForWorkerReady(sessionName, workerIndex, readyTimeoutMs, paneId);
-        const retry = await notifyWorkerPaneOutcome(sessionName, workerIndex, triggerDirective.text, paneId, workerCliPlan[i]);
+        const retry = await notifyWorkerPaneOutcome(sessionName, workerIndex, triggerDirective.text, paneId, workerCli);
         if (retry.ok) {
           outcome = retry;
         }
@@ -920,7 +920,10 @@ function resolveWorkerLaunchArgsForScaling(
   preferredReasoning?: TeamReasoningEffort,
   codexHomeOverride?: string,
 ): string[] {
-  const inheritedArgs: string[] = [];
+  const inheritedLeaderModel = typeof env[TEAM_WORKER_INHERITED_MODEL_ENV] === 'string'
+    ? env[TEAM_WORKER_INHERITED_MODEL_ENV]?.trim()
+    : undefined;
+  const inheritedArgs = inheritedLeaderModel ? ['--model', inheritedLeaderModel] : [];
   const fallbackModel = resolveAgentDefaultModel(agentType, codexHomeOverride ?? env.CODEX_HOME);
 
   return resolveTeamWorkerLaunchArgs({
@@ -928,5 +931,6 @@ function resolveWorkerLaunchArgsForScaling(
     inheritedArgs,
     fallbackModel,
     preferredReasoning,
+    honorExactRoleModel: shouldHonorAgentExactModel(agentType, codexHomeOverride),
   });
 }
