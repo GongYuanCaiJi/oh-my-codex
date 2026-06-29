@@ -64,6 +64,23 @@ function runNativeHookCli(
   );
 }
 
+function runNativeHookCliResult(
+  payload: Record<string, unknown> | string,
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+) {
+  return spawnSync(
+    process.execPath,
+    [nativeHookScriptPath()],
+    {
+      cwd: options.cwd ?? process.cwd(),
+      input: typeof payload === "string" ? payload : JSON.stringify(payload),
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      env: options.env ?? process.env,
+    },
+  );
+}
+
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true }).catch(() => {});
   await writeFile(path, JSON.stringify(value, null, 2));
@@ -687,10 +704,10 @@ describe("codex native hook dispatch", () => {
     }
   });
 
-  it("emits PreToolUse CLI block JSON with only systemMessage", async () => {
+  it("emits PreToolUse CLI block JSON as hook-specific deny with preserved systemMessage guidance", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-cli-pretool-block-schema-safe-"));
     try {
-      const output = parseSingleJsonStdout(runNativeHookCli({
+      const result = runNativeHookCliResult({
         hook_event_name: "PreToolUse",
         cwd,
         session_id: "sess-cli-pretool-block-schema-safe",
@@ -698,19 +715,29 @@ describe("codex native hook dispatch", () => {
         turn_id: "turn-cli-pretool-block-schema-safe",
         tool_name: "Bash",
         tool_input: { command: 'OMX_LORE_COMMIT_GUARD=1 git commit -m "fix tests"' },
-      }, { cwd }));
+      }, { cwd });
 
-      assert.deepEqual(Object.keys(output).sort(), ["systemMessage"]);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const output = parseSingleJsonStdout(result.stdout);
+      const hookSpecificOutput = output.hookSpecificOutput as Record<string, unknown>;
+
+      assert.deepEqual(Object.keys(output).sort(), ["hookSpecificOutput", "systemMessage"]);
       assert.match(String(output.systemMessage ?? ""), /Lore protocol/);
       assert.equal(output.decision, undefined);
+      assert.equal(output.reason, undefined);
       assert.equal(output.stopReason, undefined);
-      assert.equal(output.hookSpecificOutput, undefined);
+      assert.equal(hookSpecificOutput.hookEventName, "PreToolUse");
+      assert.equal(hookSpecificOutput.permissionDecision, "deny");
+      assert.equal(
+        hookSpecificOutput.permissionDecisionReason,
+        "git commit is blocked until the inline commit message satisfies the Lore format and includes the required OmX co-author trailer.",
+      );
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
   });
 
-  it("preserves ralplan PreToolUse planning guard as schema-safe CLI systemMessage", async () => {
+  it("preserves ralplan PreToolUse planning guard as hook-specific deny JSON", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-cli-ralplan-pretool-boundary-"));
     const sessionId = "sess-cli-ralplan-pretool-boundary";
     const stateDir = join(cwd, ".omx", "state");
@@ -730,28 +757,33 @@ describe("codex native hook dispatch", () => {
         session_id: sessionId,
       });
 
-      const output = parseSingleJsonStdout(runNativeHookCli({
+      const result = runNativeHookCliResult({
         hook_event_name: "PreToolUse",
         cwd,
         session_id: sessionId,
         thread_id: "thread-cli-ralplan-pretool-boundary",
         tool_name: "Edit",
         tool_input: { file_path: "src/runtime.ts", old_string: "a", new_string: "b" },
-      }, { cwd }));
+      }, { cwd });
 
-      assert.deepEqual(Object.keys(output).sort(), ["systemMessage"]);
-      assert.match(String(output.systemMessage ?? ""), /Ralplan is active \(phase: critic-review\)/);
-      assert.match(String(output.systemMessage ?? ""), /implementation\/write tools are blocked/);
-      assert.match(String(output.systemMessage ?? ""), /Write only planning artifacts/);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const output = parseSingleJsonStdout(result.stdout);
+      const hookSpecificOutput = output.hookSpecificOutput as Record<string, unknown>;
+      assert.deepEqual(Object.keys(output).sort(), ["hookSpecificOutput"]);
+      assert.equal(hookSpecificOutput.hookEventName, "PreToolUse");
+      assert.equal(hookSpecificOutput.permissionDecision, "deny");
+      assert.match(String(hookSpecificOutput.permissionDecisionReason ?? ""), /Ralplan is active \(phase: critic-review\)/);
+      assert.match(String(hookSpecificOutput.permissionDecisionReason ?? ""), /implementation\/write tools are blocked/);
+      assert.match(String(hookSpecificOutput.additionalContext ?? ""), /Write only planning artifacts/);
       assert.equal(output.decision, undefined);
       assert.equal(output.reason, undefined);
-      assert.equal(output.hookSpecificOutput, undefined);
+      assert.equal(output.systemMessage, undefined);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
   });
 
-  it("preserves deep-interview PreToolUse planning guard as schema-safe CLI systemMessage", async () => {
+  it("preserves deep-interview PreToolUse planning guard as hook-specific deny JSON", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-cli-deep-interview-pretool-boundary-"));
     const sessionId = "sess-cli-deep-interview-pretool-boundary";
     const stateDir = join(cwd, ".omx", "state");
@@ -771,22 +803,147 @@ describe("codex native hook dispatch", () => {
         session_id: sessionId,
       });
 
-      const output = parseSingleJsonStdout(runNativeHookCli({
+      const result = runNativeHookCliResult({
         hook_event_name: "PreToolUse",
         cwd,
         session_id: sessionId,
         thread_id: "thread-cli-deep-interview-pretool-boundary",
         tool_name: "Write",
         tool_input: { file_path: "src/runtime.ts", content: "export const changed = true;\n" },
-      }, { cwd }));
+      }, { cwd });
 
-      assert.deepEqual(Object.keys(output).sort(), ["systemMessage"]);
-      assert.match(String(output.systemMessage ?? ""), /Deep-interview is active \(phase: intent-first\)/);
-      assert.match(String(output.systemMessage ?? ""), /implementation\/write tools are blocked/);
-      assert.match(String(output.systemMessage ?? ""), /requirements\/spec mode/);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const output = parseSingleJsonStdout(result.stdout);
+      const hookSpecificOutput = output.hookSpecificOutput as Record<string, unknown>;
+      assert.deepEqual(Object.keys(output).sort(), ["hookSpecificOutput"]);
+      assert.equal(hookSpecificOutput.hookEventName, "PreToolUse");
+      assert.equal(hookSpecificOutput.permissionDecision, "deny");
+      assert.match(String(hookSpecificOutput.permissionDecisionReason ?? ""), /Deep-interview is active \(phase: intent-first\)/);
+      assert.match(String(hookSpecificOutput.permissionDecisionReason ?? ""), /implementation\/write tools are blocked/);
+      assert.match(String(hookSpecificOutput.additionalContext ?? ""), /requirements\/spec mode/);
       assert.equal(output.decision, undefined);
       assert.equal(output.reason, undefined);
-      assert.equal(output.hookSpecificOutput, undefined);
+      assert.equal(output.systemMessage, undefined);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("synthesizes a deny for malformed explicit PreToolUse blocks instead of downgrading systemMessage to advisory", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-cli-malformed-pretool-block-"));
+    try {
+      for (const malformedBlockShape of ["legacy", "deny"] as const) {
+        const result = runNativeHookCliResult({
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: `sess-cli-malformed-pretool-${malformedBlockShape}`,
+          thread_id: `thread-cli-malformed-pretool-${malformedBlockShape}`,
+          tool_name: "Bash",
+          tool_input: { command: "pwd" },
+        }, {
+          cwd,
+          env: {
+            ...process.env,
+            NODE_ENV: "test",
+            OMX_NATIVE_HOOK_TEST_MALFORMED_PRETOOL_BLOCK: malformedBlockShape,
+          },
+        });
+
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        const output = parseSingleJsonStdout(result.stdout);
+        const hookSpecificOutput = output.hookSpecificOutput as Record<string, unknown>;
+        assert.deepEqual(Object.keys(output).sort(), ["hookSpecificOutput", "systemMessage"]);
+        assert.equal(hookSpecificOutput.hookEventName, "PreToolUse");
+        assert.equal(hookSpecificOutput.permissionDecision, "deny");
+        assert.equal(
+          hookSpecificOutput.permissionDecisionReason,
+          String(output.systemMessage ?? "").trim(),
+        );
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps wrapped ralplan implementation writes blocked at raw classification while allowing planning artifacts", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-ralplan-wrapper-implementation-block-"));
+    const sessionId = "sess-ralplan-wrapper-implementation-block";
+    const stateDir = join(cwd, ".omx", "state");
+    try {
+      await writeJson(join(stateDir, "session.json"), { session_id: sessionId });
+      await writeJson(join(stateDir, "sessions", sessionId, "skill-active-state.json"), {
+        active: true,
+        skill: "ralplan",
+        phase: "planning",
+        session_id: sessionId,
+        active_skills: [{ skill: "ralplan", phase: "planning", active: true, session_id: sessionId }],
+      });
+      await writeJson(join(stateDir, "sessions", sessionId, "ralplan-state.json"), {
+        active: true,
+        mode: "ralplan",
+        current_phase: "critic-review",
+        session_id: sessionId,
+      });
+
+      const blockedWrapperCommand = "bash -lc \"cat > src/scripts/__tests__/codex-native-hook.test.ts <<'EOF'\nexport const wrappedRalplanMutation = true;\nEOF\"";
+      const blockedWrapper = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Bash",
+          tool_use_id: "tool-ralplan-wrapper-implementation-block",
+          tool_input: { command: blockedWrapperCommand },
+        },
+        { cwd },
+      );
+
+      assert.equal(blockedWrapper.outputJson && typeof blockedWrapper.outputJson === "object" ? (blockedWrapper.outputJson as { decision?: string }).decision : undefined, "block");
+      assert.match(JSON.stringify(blockedWrapper.outputJson), /Ralplan is active \(phase: critic-review\)/);
+      assert.match(JSON.stringify(blockedWrapper.outputJson), /implementation\/write tools are blocked/);
+
+      const allowedPlanningArtifactWrite = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Write",
+          tool_use_id: "tool-ralplan-wrapper-planning-artifact",
+          tool_input: { file_path: ".omx/context/ralplan-wrapper-notes.md", content: "# Planning notes\n" },
+        },
+        { cwd },
+      );
+      assert.equal(allowedPlanningArtifactWrite.outputJson, null);
+
+      const allowedBeadsMetadataWrite = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Write",
+          tool_use_id: "tool-ralplan-wrapper-beads-metadata",
+          tool_input: { file_path: ".beads/ralplan-wrapper.json", content: "{}\n" },
+        },
+        { cwd },
+      );
+      assert.equal(allowedBeadsMetadataWrite.outputJson, null);
+
+      const allowedQuotedMention = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Bash",
+          tool_use_id: "tool-ralplan-wrapper-quoted-mention",
+          tool_input: { command: "printf '%s\\n' 'src/scripts/__tests__/codex-native-hook.test.ts'" },
+        },
+        { cwd },
+      );
+      assert.equal(allowedQuotedMention.outputJson, null);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -7647,7 +7804,7 @@ exit 0
           session_id: "sess-di-artifact",
           tool_name: "Bash",
           tool_use_id: "tool-di-src-bash",
-          tool_input: { command: "cat > src/implementation.ts <<'EOF'\nexport const x = 1;\nEOF" },
+          tool_input: { command: "cat > src/scripts/__tests__/codex-native-hook.test.ts <<'EOF'\nexport const x = 1;\nEOF" },
         },
         { cwd },
       );
@@ -7786,6 +7943,58 @@ exit 0
         { cwd },
       );
       assert.equal((blockedRalplanMcpStateClear.outputJson as { decision?: string } | null)?.decision, "block");
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("emits hook-specific deny ralplan PreToolUse JSON for wrapped implementation writes on the live CLI path", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-cli-ralplan-wrapper-live-"));
+    const sessionId = "sess-cli-ralplan-wrapper-live";
+    const stateDir = join(cwd, ".omx", "state");
+    const targetPath = join(cwd, "src", "scripts", "__tests__", "codex-native-hook.test.ts");
+    try {
+      await mkdir(dirname(targetPath), { recursive: true });
+      await writeFile(targetPath, "seed\n", "utf-8");
+      await writeJson(join(stateDir, "session.json"), { session_id: sessionId, cwd });
+      await writeJson(join(stateDir, "sessions", sessionId, "skill-active-state.json"), {
+        active: true,
+        skill: "ralplan",
+        phase: "planning",
+        session_id: sessionId,
+        active_skills: [{ skill: "ralplan", phase: "planning", active: true, session_id: sessionId }],
+      });
+      await writeJson(join(stateDir, "sessions", sessionId, "ralplan-state.json"), {
+        active: true,
+        mode: "ralplan",
+        current_phase: "critic-review",
+        session_id: sessionId,
+      });
+
+      const result = runNativeHookCliResult({
+        hook_event_name: "PreToolUse",
+        cwd,
+        session_id: sessionId,
+        thread_id: "thread-cli-ralplan-wrapper-live",
+        tool_name: "Bash",
+        tool_input: {
+          command: "bash -lc \"cat > src/scripts/__tests__/codex-native-hook.test.ts <<'EOF'\nexport const wrappedRalplanMutation = true;\nEOF\"",
+        },
+      }, { cwd });
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const output = parseSingleJsonStdout(result.stdout);
+      const hookSpecificOutput = output.hookSpecificOutput as Record<string, unknown>;
+      assert.deepEqual(Object.keys(output).sort(), ["hookSpecificOutput"]);
+      assert.equal(hookSpecificOutput.hookEventName, "PreToolUse");
+      assert.equal(hookSpecificOutput.permissionDecision, "deny");
+      assert.match(String(hookSpecificOutput.permissionDecisionReason ?? ""), /Ralplan is active \(phase: critic-review\)/);
+      assert.match(String(hookSpecificOutput.permissionDecisionReason ?? ""), /implementation\/write tools are blocked/);
+      assert.match(String(hookSpecificOutput.additionalContext ?? ""), /Write only planning artifacts/);
+      assert.equal(output.decision, undefined);
+      assert.equal(output.reason, undefined);
+      assert.equal(output.systemMessage, undefined);
+      assert.equal(await readFile(targetPath, "utf-8"), "seed\n");
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -8940,7 +9149,7 @@ exit 0
     }
   });
 
-  it("emits schema-safe PreToolUse CLI stdout for close_agent capacity blocks", async () => {
+  it("emits hook-specific deny PreToolUse CLI stdout for close_agent capacity blocks", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-cli-subagent-capacity-close-block-"));
     try {
       parseSingleJsonStdout(runNativeHookCli({
@@ -8953,20 +9162,28 @@ exit 0
         tool_response: "collab spawn failed: agent thread limit reached",
       }, { cwd }));
 
-      const output = parseSingleJsonStdout(runNativeHookCli({
+      const result = runNativeHookCliResult({
         hook_event_name: "PreToolUse",
         cwd,
         session_id: "sess-cli-subagent-capacity-close-block",
         thread_id: "thread-cli-subagent-capacity-close-block",
         tool_name: "multi_agent_v1.close_agent",
         tool_input: { target: "019ecc36-stale" },
-      }, { cwd }));
+      }, { cwd });
 
-      assert.deepEqual(Object.keys(output).sort(), ["systemMessage"]);
-      assert.match(String(output.systemMessage ?? ""), /agent thread limit reached/);
-      assert.match(String(output.systemMessage ?? ""), /Do not call multi_agent_v1\.close_agent/);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const output = parseSingleJsonStdout(result.stdout);
+
+      const hookSpecificOutput = output.hookSpecificOutput as Record<string, unknown>;
+      assert.deepEqual(Object.keys(output).sort(), ["hookSpecificOutput"]);
+      assert.equal(hookSpecificOutput.hookEventName, "PreToolUse");
+      assert.equal(hookSpecificOutput.permissionDecision, "deny");
+      assert.match(String(hookSpecificOutput.permissionDecisionReason ?? ""), /Native subagent capacity was exhausted recently/);
+      assert.match(String(hookSpecificOutput.additionalContext ?? ""), /agent thread limit reached/);
+      assert.match(String(hookSpecificOutput.additionalContext ?? ""), /Do not call multi_agent_v1\.close_agent/);
       assert.equal(output.decision, undefined);
-      assert.equal(output.hookSpecificOutput, undefined);
+      assert.equal(output.reason, undefined);
+      assert.equal(output.systemMessage, undefined);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
