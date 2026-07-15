@@ -7528,6 +7528,17 @@ case "$1" in
         ;;
     esac
     ;;
+  show-option|show-options)
+    case "$*" in
+      *"-p -t %11 @omx_team_pane_owner_id"*|*"-p -t %13 @omx_team_pane_owner_id"*|*"-p -t %14 @omx_team_pane_owner_id"*)
+        echo "team:team-shutdown-prekill-order"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
   kill-pane)
     : > "${orderPath}.killed-$3"
     exit 0
@@ -7550,8 +7561,11 @@ esac
           config.leader_pane_id = '%11';
           config.leader_pane_pid = 2000000011;
           config.hud_pane_id = null;
+          config.tmux_pane_owner_id = 'team:team-shutdown-prekill-order';
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = paneOnePid;
           config.workers[1]!.pane_id = '%14';
+          config.workers[1]!.pid = paneTwoPid;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam('team-shutdown-prekill-order', cwd, { force: true });
@@ -7597,11 +7611,14 @@ case "$1" in
   list-panes)
     case "$*" in
       *"-a -F #{pane_id}"*)
-        if [ -f "${proofStatePath}" ]; then
-          printf 'not-a-pane-snapshot\\n'
-        else
+        if [ ! -f "${proofStatePath}" ]; then
           : > "${proofStatePath}"
-          printf "%%404\\t0\\t${process.pid}\\n"
+          printf "%%404\t0\t${process.pid}\n"
+        elif [ ! -f "${proofStatePath}.owner-authorized" ]; then
+          : > "${proofStatePath}.owner-authorized"
+          printf "%%404\t0\t${process.pid}\n"
+        else
+          printf 'not-a-pane-snapshot\n'
         fi
         exit 0
         ;;
@@ -7609,6 +7626,18 @@ case "$1" in
         exit 1
         ;;
     esac
+    ;;
+  show-option|show-options)
+    case "$*" in
+      *"-p -t %404 @omx_team_pane_owner_id"*)
+        echo "team:team-shutdown-malformed-proof"
+        : > "${proofStatePath}.owner-authorized"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    exit 0
     ;;
   kill-pane|kill-session)
     exit 0
@@ -7625,7 +7654,9 @@ esac
           assert.ok(config);
           if (!config) return;
           config.tmux_session = 'omx-team-team-shutdown-malformed-proof';
+          config.tmux_pane_owner_id = 'team:team-shutdown-malformed-proof';
           config.workers[0]!.pane_id = '%404';
+          config.workers[0]!.pid = process.pid;
           config.resize_hook_name = 'omx_resize_team_shutdown_malformed_proof_test';
           config.resize_hook_target = 'omx-team-team-shutdown-malformed-proof:0';
           await saveTeamConfig(config, cwd);
@@ -7690,6 +7721,17 @@ case "$1" in
         ;;
     esac
     ;;
+  show-option|show-options)
+    case "$*" in
+      *"-p -t %404 @omx_team_pane_owner_id"*)
+        echo "team:team-exact-final-unknown"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
   *)
     exit 0
     ;;
@@ -7702,7 +7744,9 @@ esac
           assert.ok(config);
           if (!config) return;
           config.tmux_session = 'omx-team-exact-final-unknown';
+          config.tmux_pane_owner_id = 'team:team-exact-final-unknown';
           config.workers[0]!.pane_id = '%404';
+          config.workers[0]!.pid = process.pid;
           await saveTeamConfig(config, cwd);
 
           let clock = originalDateNow();
@@ -7784,7 +7828,7 @@ esac
           );
           assert.equal(result.ok, false);
           if (result.ok) return;
-          assert.match(result.error, /scale_down_pane_proof_unavailable:%405:query_failed/);
+          assert.match(result.error, /scale_down_cleanup_debt:pane_teardown_unresolved:%405/);
 
           const committedConfig = await readTeamConfig('team-scale-down-pane-proof', cwd);
           assert.equal(committedConfig?.workers.length, 1);
@@ -9949,13 +9993,37 @@ case "$1" in
   list-panes)
     case "$*" in
       *"-a -F #{pane_id}"*)
+        if [ ! -f "${tmuxLogPath}.killed-%11" ]; then printf "%%11\t0\t2000000011\n"; fi
         if [ ! -f "${tmuxLogPath}.killed-%12" ]; then printf "%%12\t0\t2000000012\n"; fi
         if [ ! -f "${tmuxLogPath}.killed-%13" ]; then printf "%%13\t0\t2000000013\n"; fi
+        if [ -f "${tmuxLogPath}.hud-created" ]; then printf "%%44\t0\t2000000044\n"; fi
+        ;;
+      *"-t omx-team-team-shutdown-exclusions:0"*)
+        printf "%%11\tzsh\tzsh\n%%12\tnode\tnode /tmp/bin/omx.js hud --watch\n%%13\tcodex\tenv OMX_TEAM_INTERNAL_WORKER=team-shutdown-exclusions/worker-3 codex\n"
+        ;;
+      *"-t %11 -F #{pane_id}"*)
+        printf "%%11\tzsh\tzsh\n"
         ;;
       *)
         exit 1
         ;;
     esac
+    ;;
+  show-option|show-options)
+    case "$*" in
+      *"-p -t %11 @omx_team_pane_owner_id"*|*"-p -t %12 @omx_team_pane_owner_id"*|*"-p -t %13 @omx_team_pane_owner_id"*)
+        echo "team:team-shutdown-exclusions"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    : > "${tmuxLogPath}.hud-created"
+    printf '%%44\n'
+    exit 0
     ;;
   kill-pane)
     : > "${tmuxLogPath}.killed-$3"
@@ -9975,11 +10043,12 @@ esac
           const config = await readTeamConfig('team-shutdown-exclusions', cwd);
           assert.ok(config);
           if (!config) return;
-          config.tmux_session = 'omx-team-team-shutdown-exclusions';
+          config.tmux_session = 'omx-team-team-shutdown-exclusions:0';
           config.leader_pane_id = '%11';
           config.leader_pane_pid = 2000000011;
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
+          config.tmux_pane_owner_id = 'team:team-shutdown-exclusions';
           config.workers[0]!.pane_id = '%11';
           config.workers[0]!.pid = 2000000011;
           config.workers[1]!.pane_id = '%12';

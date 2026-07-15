@@ -53,6 +53,11 @@ if [[ "\$cmd" == "capture-pane" ]]; then
   exit 0
 fi
 
+if [[ "$cmd" == "show-option" ]]; then
+  printf '%s\n' "\${OMX_TEAM_OWNER:-omx-team-a-owner}"
+  exit 0
+fi
+
 if [[ "\$cmd" == "send-keys" ]]; then
   if [[ "\${OMX_FAIL_SEND_KEYS:-0}" == "1" ]]; then
     exit 1
@@ -264,6 +269,24 @@ describe('idle-nudge', () => {
 
       const idle = await isPaneIdle('%2');
       assert.equal(idle, false);
+    });
+  });
+
+  it('fails closed for replacement, owner drift, and HUD nudge targets', async () => {
+    await withFakeTmux(async ({ tmuxLogPath }) => {
+      await withMockedNow(10_000, async () => {
+        const targets = [
+          { paneId: '%2', workerIndex: 1, panePid: 999, teamOwnerId: 'omx-team-a-owner' },
+          { paneId: '%2', workerIndex: 1, panePid: 12345, teamOwnerId: 'foreign-owner' },
+          { paneId: '%2', workerIndex: 1, panePid: 12345, teamOwnerId: 'omx-team-a-owner', hudPaneId: '%2' },
+        ];
+        for (const target of targets) {
+          const tracker = new NudgeTracker({ delayMs: 0, maxCount: 1, message: 'nudge' });
+          assert.deepEqual(await tracker.checkAndNudge([target], undefined, 'omx-team-a'), []);
+        }
+        const log = existsSync(tmuxLogPath) ? await readFile(tmuxLogPath, 'utf-8') : '';
+        assert.doesNotMatch(log, /send-keys/);
+      });
     });
   });
 });

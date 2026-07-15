@@ -3443,6 +3443,70 @@ esac
     }
   });
 
+  it('retains PID-less rollback debt when a recycled same-Team pane remains live', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-down-unpinned-recycled-'));
+    const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-down-unpinned-recycled-bin-'));
+    const tmuxLogPath = join(fakeBinDir, 'tmux.log');
+    const tmuxStubPath = join(fakeBinDir, 'tmux');
+    const previousPath = process.env.PATH;
+    try {
+      await writeFile(tmuxStubPath, `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "\${1:-}" in
+  list-panes) printf '%%405\\t0\\t999405\\n' ;;
+  show-option|kill-pane) echo "PID-less debt must not authorize an effect" >&2; exit 99 ;;
+esac
+`);
+      await chmod(tmuxStubPath, 0o755);
+      process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
+
+      await initTeamState('unpinned-recycled', 'task', 'executor', 2, cwd);
+      const config = await readTeamConfig('unpinned-recycled', cwd);
+      assert.ok(config);
+      if (!config) return;
+      config.workers[1]!.pane_id = '%405';
+      config.workers[1]!.pid = undefined;
+      config.tmux_pane_owner_id = 'team:scale-down';
+      await saveTeamConfig(config, cwd);
+
+      const initial = await scaleDown('unpinned-recycled', cwd, { workerNames: ['worker-2'], force: true }, {
+        OMX_TEAM_SCALING_ENABLED: '1',
+      });
+      assert.deepEqual(initial, {
+        ok: false,
+        error: 'scale_down_cleanup_debt:pane_teardown_unresolved:%405',
+      });
+      const debtPath = join(cwd, '.omx', 'state', 'team', 'unpinned-recycled', '.scale-down-cleanup-debt.json');
+      const initialDebt = JSON.parse(await readFile(debtPath, 'utf8')) as {
+        unresolved_panes: Array<{ name: string; index: number; pane_id: string; pid: number | null }>;
+        reasons: string[];
+      };
+      assert.deepEqual(initialDebt.unresolved_panes, [{ name: 'worker-2', index: 2, pane_id: '%405', pid: null }]);
+      assert.ok(initialDebt.reasons.includes('%405:legacy_pid_missing_live'));
+
+      const canonical = await readTeamConfig('unpinned-recycled', cwd);
+      assert.ok(canonical);
+      if (!canonical) return;
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('unpinned-recycled', cwd, canonical), {
+        ok: false,
+        error: 'scale_down_cleanup_debt_unresolved:%405',
+      });
+      const reconciledDebt = JSON.parse(await readFile(debtPath, 'utf8')) as { reasons: string[] };
+      assert.ok(reconciledDebt.reasons.includes('%405:legacy_pid_missing_live'));
+      const commands = await readScaleUpTmuxLogCommands(tmuxLogPath);
+      assert.deepEqual(commands, [
+        'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
+        'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
+      ]);
+    } finally {
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      await rm(cwd, { recursive: true, force: true });
+      await rm(fakeBinDir, { recursive: true, force: true });
+    }
+  });
+
   it('scaleDown never targets leader or hud panes during teardown', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-down-exclusions-'));
     const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-down-fake-tmux-'));

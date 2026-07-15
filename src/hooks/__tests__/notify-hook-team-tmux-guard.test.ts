@@ -922,3 +922,40 @@ echo foreign-content
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+it('authorizes Team ownership before reading the start command', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'omx-team-tmux-start-command-owner-'));
+  const fakeBinDir = join(cwd, 'fake-bin');
+  const tmuxLogPath = join(cwd, 'tmux.log');
+  try {
+    await mkdir(fakeBinDir, { recursive: true });
+    await writeFile(join(fakeBinDir, 'tmux'), `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+if [ "$1" = "list-panes" ]; then printf '%%42\t0\t4242\n'; exit 0; fi
+if [ "$1" = "show-option" ]; then echo team:foreign; exit 0; fi
+if [ "$1" = "display-message" ]; then echo foreign-command; exit 0; fi
+`);
+    await chmod(join(fakeBinDir, 'tmux'), 0o755);
+    const moduleUrl = new URL('../../../dist/scripts/notify-hook/team-tmux-guard.js', import.meta.url).href;
+    const result = runSendPaneInputInChild({
+      fakeBinDir,
+      moduleUrl,
+      paneTarget: '%42',
+      exactPaneId: '%42',
+      expectedPanePid: 4242,
+      expectedPaneOwnerId: 'team:alpha',
+      prompt: 'must not inspect or send',
+      submitKeyPresses: 1,
+      typePrompt: false,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.exactPaneProof.reason, 'pane_owner_changed');
+    const log = await readFile(tmuxLogPath, 'utf8');
+    assert.doesNotMatch(log, /display-message|send-keys|paste-buffer/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

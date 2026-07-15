@@ -773,6 +773,18 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload, context 
       }).catch(() => {});
       return;
     }
+    const readinessPanePid = asNumber(paneGuard.exactPaneProof?.pid);
+    if (!Number.isInteger(readinessPanePid) || readinessPanePid <= 0) {
+      await logTmuxHookEvent(logsDir, {
+        timestamp: new Date().toISOString(),
+        type: 'auto_nudge_skipped',
+        pane_id: paneId,
+        reason: 'pane_readiness_unverified',
+        source,
+      }).catch(() => {});
+      return;
+    }
+    const pinnedPaneOptions = { ...teamPaneOptions, expectedPanePid: readinessPanePid };
 
     const blockedAutoApproval = isDeepInterviewAutoApprovalLocked(skillState)
       && !releaseReason
@@ -802,7 +814,7 @@ export async function maybeAutoNudge({ cwd, stateDir, logsDir, payload, context 
       const sendResult = await sendPaneInput({
         paneTarget: paneId,
         exactPaneId: paneId,
-        ...teamPaneOptions,
+        ...pinnedPaneOptions,
         prompt: `${effectiveResponse} ${DEFAULT_MARKER}`,
         submitKeyPresses: 2,
         submitDelayMs: 100,

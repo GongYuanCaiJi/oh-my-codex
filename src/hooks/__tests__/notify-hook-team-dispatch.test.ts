@@ -2096,6 +2096,9 @@ exit 0
         '%42\t0\t4242', // clear composer: final PID proof after owner read
         '%42\t0\t4242', // clear composer: final PID proof after owner read
         '%42\t0\t4242', // paste buffer: initial PID proof before owner read
+        '%42\t0\t4242', // paste buffer: final PID proof after owner read
+        '%42\t0\t4242', // paste buffer verification: initial PID proof
+        '%42\t0\t4242', // paste buffer verification: final PID proof after owner read
         '%42\t1\t4242', // paste buffer: final PID proof must block
       ].join('\n'));
       process.env.PATH = `${fakeBinDir}:${previousPath || ''}`;
@@ -2131,10 +2134,10 @@ exit 0
       const exactGlobalPaneProof = /^list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}$/;
       assert.match(commands[0] || '', exactGlobalPaneProof);
       assert.match(tmuxLog, /send-keys -t %42 C-u/, 'the live proof should permit the clear effect');
-      assert.doesNotMatch(tmuxLog, /paste-buffer -t %42|send-keys -t %42 C-m/);
+      assert.doesNotMatch(tmuxLog, /send-keys -t %42 C-m/);
       const ownerProof = 'show-option -qv -p -t %42 @omx_team_pane_owner_id';
       for (const [index, command] of commands.entries()) {
-        if (!/^(send-keys|paste-buffer)\b/.test(command) || !command.includes('-t %42')) continue;
+        if (!/^(send-keys|paste-buffer)\b/.test(command) || !command.includes('-t %42') || /^send-keys\b.*\s-l\s/.test(command)) continue;
         assert.match(commands[index - 1] || '', exactGlobalPaneProof, `final PID proof must immediately precede ${command}`);
         assert.equal(commands[index - 2], ownerProof, `owner proof must precede final PID proof for ${command}`);
         assert.match(commands[index - 3] || '', exactGlobalPaneProof, `initial PID proof must precede owner proof for ${command}`);

@@ -3602,7 +3602,14 @@ export async function startTeam(
         const ready = await waitForWorkerReadyAsync(sessionName, workerIndex, workerReadyTimeoutMs, paneId, config!.workers[workerIndex - 1]?.pid, config!.tmux_pane_owner_id ?? undefined, config!.hud_pane_id ?? undefined);
         startupTiming.mark('ready_wait_end', { worker: workerName, pane_id: paneId, ok: ready });
         if (!ready) {
-          const workerAlive = isWorkerPaneOpen(sessionName, workerIndex, paneId);
+          const workerAlive = isWorkerPaneOpen(
+            sessionName,
+            workerIndex,
+            paneId,
+            config!.workers[workerIndex - 1]?.pid,
+            config!.tmux_pane_owner_id ?? undefined,
+            config!.hud_pane_id ?? undefined,
+          );
           if (workerAlive) {
             await recordRecoverableStartupIssue({
               teamName: sanitized,
@@ -3676,7 +3683,14 @@ export async function startTeam(
       if (!dispatchOutcome.ok) {
         const workerAlive = workerLaunchMode === 'prompt'
           ? isPromptWorkerAlive(config!, config!.workers[workerIndex - 1]!)
-          : isWorkerPaneOpen(sessionName, workerIndex, paneId);
+          : isWorkerPaneOpen(
+            sessionName,
+            workerIndex,
+            paneId,
+            config!.workers[workerIndex - 1]?.pid,
+            config!.tmux_pane_owner_id ?? undefined,
+            config!.hud_pane_id ?? undefined,
+          );
         if (workerLaunchMode === 'prompt' && !workerAlive) {
           await recordPromptStartupWorkerStopped({
             teamName: sanitized,
@@ -3989,7 +4003,7 @@ export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSn
     config.workers.map(async (worker) => {
       const alive = config.worker_launch_mode === 'prompt'
         ? isPromptWorkerAlive(config, worker)
-        : isWorkerAlive(sessionName, worker.index, worker.pane_id);
+        : isWorkerAlive(sessionName, worker.index, worker.pane_id, worker.pid, config.tmux_pane_owner_id ?? undefined, config.hud_pane_id ?? undefined);
       const [status, heartbeat] = await Promise.all([
         readWorkerStatus(sanitized, worker.name, cwd),
         readWorkerHeartbeat(sanitized, worker.name, cwd),
@@ -4521,7 +4535,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       const anyAlive = config.workers.some((w) => (
         config.worker_launch_mode === 'prompt'
           ? isPromptWorkerAlive(config, w)
-          : isWorkerAlive(sessionName, w.index, w.pane_id)
+          : isWorkerAlive(sessionName, w.index, w.pane_id, w.pid, config.tmux_pane_owner_id ?? undefined, config.hud_pane_id ?? undefined)
       ));
       if (!anyAlive) break;
       // Sleep 2s
@@ -4531,7 +4545,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     const anyAliveAfterWait = config.workers.some((w) => (
       config.worker_launch_mode === 'prompt'
         ? isPromptWorkerAlive(config, w)
-        : isWorkerAlive(sessionName, w.index, w.pane_id)
+        : isWorkerAlive(sessionName, w.index, w.pane_id, w.pid, config.tmux_pane_owner_id ?? undefined, config.hud_pane_id ?? undefined)
     ));
     if (anyAliveAfterWait && !force) {
       // Workers may have accepted shutdown but not exited (Codex TUI requires explicit exit).
@@ -4749,12 +4763,30 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         }
       }
     }
+    const authorizeFrozenSharedWorkerProcessSignal = (paneId: string, panePid: number): boolean => {
+      const expectedPid = expectedSharedWorkerPanePids.get(paneId)
+        ?? config.workers.find((worker) => worker.pane_id === paneId)?.pid;
+      if (expectedPid !== panePid) return false;
+      if (sharedSessionTopology && frozenSharedWorkerOwnerIds.has(paneId)) {
+        const expectedOwner = frozenSharedWorkerOwnerIds.get(paneId);
+        const owner = readPaneTeamOwnerTagResult(paneId);
+        return expectedOwner === null
+          ? owner.status === 'missing'
+          : owner.status === 'value' && owner.value === expectedOwner;
+      }
+      const owner = readPaneTeamOwnerTagResult(paneId);
+      return owner.status === 'value' && owner.value === tmuxPaneOwnerId;
+    };
+
     if (shouldPrekillInteractiveShutdownProcessTrees(sessionName)) {
       const paneProcessProofUnavailable: ExactPaneUnavailableProof[] = [];
       for (const paneId of shutdownPaneIds) {
         const teardown = await terminateExactPaneProcessTree(
           paneId,
           config.workers.find((worker) => worker.pane_id === paneId)?.pid ?? expectedSharedWorkerPanePids.get(paneId),
+          undefined,
+          undefined,
+          authorizeFrozenSharedWorkerProcessSignal,
         );
         if (teardown.proofUnavailable) {
           await persistGonePaneDescendantCleanupDebt({ teamName: sanitized, cwd, config, paneId, teardown });

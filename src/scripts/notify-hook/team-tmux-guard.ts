@@ -416,7 +416,7 @@ export async function sendPaneInput({
     }
     return verifyExplicitPane();
   };
-  const initialProof = await verifyExplicitPane();
+  const initialProof = await verifyForEffect();
   if (!initialProof.ok) return exactPaneUnavailableResult(target, initialProof);
   try {
     const startCommandResult = await runProcess('tmux', ['display-message', '-p', '-t', target, '#{pane_start_command}'], 3000);
@@ -433,7 +433,7 @@ export async function sendPaneInput({
       readinessEvidence: 'start_command_failed',
     };
   }
-  const postHudProof = await verifyExplicitPane();
+  const postHudProof = await verifyForEffect();
   if (!postHudProof.ok) return exactPaneUnavailableResult(target, postHudProof);
 
   const normalizedSubmitKeyPresses = Number.isFinite(submitKeyPresses)

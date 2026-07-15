@@ -424,6 +424,48 @@ esac
     }
   });
 
+  it('tolerates unrelated PID-less rows while rejecting malformed or duplicate HUD targets in generated hook proofs', async () => {
+    const previousFixture = process.env.OMX_HUD_HOOK_FIXTURE;
+    try {
+      await withMockTmuxFixture(
+        'omx-hud-hook-unrelated-pidless-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "$1" in
+  list-panes)
+    case "\${OMX_HUD_HOOK_FIXTURE:-}" in
+      unrelated-pidless) printf '%%99\\t0\\t\\n%%7\\t0\\t2000000007\\n' ;;
+      target-malformed) printf '%%7\\t0\\t\\n%%99\\t0\\t2000000099\\n' ;;
+      target-duplicate) printf '%%7\\t0\\t2000000007\\n%%7\\t0\\t2000000007\\n' ;;
+    esac
+    ;;
+  show-option) printf 'team:expected\\n' ;;
+  resize-pane) exit 0 ;;
+esac
+`,
+        async ({ logPath }) => {
+          const command = buildReconcileHudResizeArgs('%7', HUD_TMUX_TEAM_HEIGHT_LINES, 2000000007, 'team:expected')[1] ?? '';
+          for (const [fixture, shouldResize] of [
+            ['unrelated-pidless', true],
+            ['target-malformed', false],
+            ['target-duplicate', false],
+          ] as const) {
+            process.env.OMX_HUD_HOOK_FIXTURE = fixture;
+            const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf-8' });
+            assert.equal(result.status, 0, fixture);
+            const commands = await readFile(logPath, 'utf-8');
+            assert.equal(/resize-pane/.test(commands), shouldResize, `${fixture}: ${commands}`);
+            await writeFile(logPath, '');
+          }
+        },
+      );
+    } finally {
+      if (typeof previousFixture === 'string') process.env.OMX_HUD_HOOK_FIXTURE = previousFixture;
+      else delete process.env.OMX_HUD_HOOK_FIXTURE;
+    }
+  });
+
   it('resolves the tmux executable for win32 hook shell snippets', async () => {
     const fakeBin = await mkdtemp(join(tmpdir(), 'omx-win32-hook-tmux-'));
     const prevPath = process.env.PATH;
@@ -6805,16 +6847,19 @@ case "\${1:-}" in
     fi
     exit 1
     ;;
+  show-option)
+    printf 'team:liveness\n'
+    ;;
   *)
     exit 1
     ;;
 esac
 `,
       async () => {
-        assert.equal(isWorkerAlive('ignored-session', 1, '%77'), true);
-        assert.equal(isWorkerPaneOpen('ignored-session', 1, '%77'), true);
-        assert.equal(isWorkerAlive('ignored-session', 2, '%88'), false);
-        assert.equal(isWorkerPaneOpen('ignored-session', 2, '%88'), false);
+        assert.equal(isWorkerAlive('ignored-session', 1, '%77', process.pid, 'team:liveness'), true);
+        assert.equal(isWorkerPaneOpen('ignored-session', 1, '%77', process.pid, 'team:liveness'), true);
+        assert.equal(isWorkerAlive('ignored-session', 2, '%88', 1, 'team:liveness'), false);
+        assert.equal(isWorkerPaneOpen('ignored-session', 2, '%88', 1, 'team:liveness'), false);
       },
     );
   });
@@ -6831,6 +6876,9 @@ set -eu
 case "$1" in
   list-panes)
     printf '%%13\t0\t%s\n%%130\t0\t%s\n%%9\t1\t1\n' "${pane13Pid}" "${pane130Pid}"
+    ;;
+  show-option)
+    printf 'team:rows\n'
     ;;
   *)
     exit 1
@@ -6851,8 +6899,8 @@ esac
           paneId: '%130',
           pid: pane130Pid,
         });
-        assert.equal(getWorkerPanePid('ignored-session', 1, '%13'), pane13Pid);
-        assert.equal(getWorkerPanePid('ignored-session', 1, '%130'), pane130Pid);
+        assert.equal(getWorkerPanePid('ignored-session', 1, '%13', pane13Pid, 'team:rows'), pane13Pid);
+        assert.equal(getWorkerPanePid('ignored-session', 1, '%130', pane130Pid, 'team:rows'), pane130Pid);
       },
     );
   });
@@ -6952,7 +7000,7 @@ esac
         killWorkerByPaneId('%1', 1);
         await killWorkerByPaneIdAsync('%1', 1);
 
-        const log = await readFile(logPath, 'utf-8');
+        const log = fs.existsSync(logPath) ? await readFile(logPath, 'utf-8') : '';
         assert.doesNotMatch(log, /list-panes -t ignored-session:1/);
         assert.doesNotMatch(log, /send-keys/);
         assert.doesNotMatch(log, /kill-pane/);
@@ -7217,14 +7265,17 @@ case "$1" in
     if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
     count=$((count + 1))
     printf '%s' "$count" > "$count_file"
-    if [ "$count" -le 10 ]; then
+    if [ -f "$state_dir/killed" ]; then
+      :
+    elif [ "$count" -le 10 ]; then
       printf '%%9\t0\t%s\n' "$PPID"
     else
       printf '%%9\t0\t999999999\n'
     fi
     ;;
   show-option) printf 'team:kill-test\n' ;;
-  send-keys|kill-pane) ;;
+  send-keys) ;;
+  kill-pane) : > "$state_dir/killed" ;;
   *) exit 1 ;;
 esac
 `,
@@ -7235,7 +7286,7 @@ esac
         assert.match(commands, /send-keys -t %9 C-d/);
         assert.equal(
           (commands.match(/list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}/g) || []).length,
-          10,
+          11,
           `liveness and effects must each use the pinned proof around owner authorization:\n${commands}`,
         );
       },
@@ -7454,11 +7505,13 @@ describe('killWorkerByPaneId exact PID guard', () => {
       (logPath) => `#!/bin/sh
 printf '%s\\n' "$*" >> "${logPath}"
 if [ "$1" = "list-panes" ]; then
-  printf '%%5\\t0\\t222\\n'
+  printf '%%5\t0\t222\n'
+elif [ "$1" = "show-option" ]; then
+  printf 'team:expected\n'
 fi
 `,
       async ({ logPath }) => {
-        killWorkerByPaneId('%5', 111);
+        killWorkerByPaneId('%5', 111, undefined, 'team:expected', '%6');
         const log = await readFile(logPath, 'utf-8');
         assert.match(log, /list-panes -a/);
         assert.doesNotMatch(log, /kill-pane -t %5/);
@@ -7472,17 +7525,37 @@ fi
       (logPath) => `#!/bin/sh
 printf '%s\\n' "$*" >> "${logPath}"
 if [ "$1" = "list-panes" ]; then
-  printf '%%5\\t0\\t222\\n'
+  printf '%%5\t0\t222\n'
+elif [ "$1" = "show-option" ]; then
+  printf 'team:expected\n'
 fi
 `,
       async ({ logPath }) => {
-        await killWorkerByPaneIdAsync('%5', 111);
+        await killWorkerByPaneIdAsync('%5', 111, undefined, 'team:expected', '%6');
         const log = await readFile(logPath, 'utf-8');
         assert.match(log, /list-panes -a/);
         assert.doesNotMatch(log, /kill-pane -t %5/);
       },
     );
   });
+  it('rejects unbound, HUD, and owner-taken-over direct kill targets without effects', async () => {
+    await withMockTmuxFixture(
+      'omx-direct-kill-owner-hud-',
+      (logPath) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${logPath}"
+case "$1" in
+  list-panes) printf '%%5\\t0\\t111\\n' ;;
+  show-option) printf 'team:foreign\\n' ;;
+esac`,
+      async ({ logPath }) => {
+        killWorkerByPaneId('%5', 111);
+        killWorkerByPaneId('%5', 111, undefined, 'team:expected', '%5');
+        killWorkerByPaneId('%5', 111, undefined, 'team:expected', '%6');
+        assert.doesNotMatch(await readFile(logPath, 'utf8'), /kill-pane/);
+      },
+    );
+  });
+
 });
 
 describe('sleepFractionalSeconds', () => {
@@ -7677,7 +7750,7 @@ printf '%s\n' "$*" >> "${logPath}"
 case "$1" in
   list-panes)
     if [ ! -f "${logPath}.dead" ]; then
-      printf '%%3\t0\t%s\n' "$$"
+      printf '%%3\t0\t%s\n' "$PPID"
     fi
     ;;
   kill-pane)
@@ -7692,6 +7765,7 @@ esac`,
           leaderPaneId: '%1',
           hudPaneId: '%2',
           graceMs: 1,
+          expectedPanePids: { '%3': process.pid },
         });
 
         assert.equal(summary.excluded.leader, 1);
@@ -7725,7 +7799,7 @@ case "$1" in
     ;;
 esac`,
       async ({ logPath }) => {
-        const summary = await teardownWorkerPanes(['%77'], { graceMs: 1 });
+        const summary = await teardownWorkerPanes(['%77'], { graceMs: 1, expectedPanePids: { '%77': 7701 } });
         assert.equal(summary.kill.attempted, 1);
         assert.equal(summary.kill.succeeded, 0);
         assert.equal(summary.kill.failed, 1);
@@ -7781,7 +7855,7 @@ set -eu
 printf '%s\n' "$*" >> "${logPath}"
 case "$1" in
   list-panes)
-    printf '%%405\t0\t%s\n' "$$"
+    printf '%%405\t0\t%s\n' "$PPID"
     ;;
   kill-pane)
     echo "target command failed" >&2
@@ -7793,7 +7867,7 @@ case "$1" in
 esac
 `,
       async ({ logPath }) => {
-        const summary = await teardownWorkerPanes(['%404', '%405'], { graceMs: 1 });
+        const summary = await teardownWorkerPanes(['%404', '%405'], { graceMs: 1, expectedPanePids: { '%405': process.pid } });
         assert.equal(summary.kill.attempted, 1);
         assert.equal(summary.kill.succeeded, 0);
         assert.equal(summary.kill.failed, 1);
@@ -7830,6 +7904,21 @@ fi
         const emptyTarget = await readExactPaneProof('%99');
         assert.equal(emptyTarget.status, 'unavailable');
         if (emptyTarget.status === 'unavailable') assert.equal(emptyTarget.reason, 'malformed_snapshot');
+      },
+    );
+  });
+
+  it('retains a live pane as unresolved teardown debt when no positive PID was persisted', async () => {
+    await withMockTmuxFixture(
+      'omx-teardown-pid-missing-',
+      (logPath) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${logPath}"
+if [ "$1" = "list-panes" ]; then printf '%%42\\t0\\t4242\\n'; fi`,
+      async ({ logPath }) => {
+        const summary = await teardownWorkerPanes(['%42'], { graceMs: 1 });
+        assert.equal(summary.kill.attempted, 0);
+        assert.deepEqual(summary.proofUnavailable.map((proof) => proof.paneId), ['%42']);
+        assert.doesNotMatch(await readFile(logPath, 'utf8'), /kill-pane/);
       },
     );
   });

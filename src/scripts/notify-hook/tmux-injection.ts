@@ -687,6 +687,7 @@ export async function handleTmuxInjection({ payload, cwd, stateDir, logsDir, con
 
   // Shared pane-state guard: skip injection when the target pane is scrolling,
   // has returned to a shell, is still bootstrapping, or is visibly busy.
+  let readinessPanePid: number | undefined;
   try {
     const paneGuard = await evaluatePaneInjectionReadiness(paneTarget, {
       skipIfScrolling: config.skip_if_scrolling,
@@ -704,6 +705,19 @@ export async function handleTmuxInjection({ payload, cwd, stateDir, logsDir, con
         pane_target: paneTarget,
         pane_current_command: paneGuard.paneCurrentCommand || undefined,
         pane_capture_excerpt: paneGuard.paneCapture ? paneGuard.paneCapture.slice(-200) : undefined,
+      });
+      return;
+    }
+    readinessPanePid = asNumber(paneGuard.exactPaneProof?.pid);
+    if (!Number.isInteger(readinessPanePid) || readinessPanePid <= 0) {
+      state.last_reason = 'pane_readiness_unverified';
+      state.last_event_at = nowIso;
+      await writeFile(hookStatePath, JSON.stringify(state, null, 2)).catch(() => {});
+      await logTmuxHookEvent(logsDir, {
+        ...baseLog,
+        event: 'injection_skipped',
+        reason: 'pane_readiness_unverified',
+        pane_target: paneTarget,
       });
       return;
     }
@@ -738,6 +752,7 @@ export async function handleTmuxInjection({ payload, cwd, stateDir, logsDir, con
       paneTarget,
       prompt,
       exactPaneId: paneTarget,
+      expectedPanePid: readinessPanePid,
       submitKeyPresses: argv.submitArgv.length,
       submitDelayMs: 25,
     });

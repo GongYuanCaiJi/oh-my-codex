@@ -1868,7 +1868,14 @@ export async function scaleDown(
           targetWorkers.map(async (w) => {
             const status = await readWorkerStatus(sanitized, w.name, leaderCwd);
             return status.state === 'idle' || status.state === 'done' ||
-                   status.state === 'draining' || !isWorkerAlive(sessionName, w.index, w.pane_id);
+                   status.state === 'draining' || !isWorkerAlive(
+                     sessionName,
+                     w.index,
+                     w.pane_id,
+                     w.pid,
+                     config.tmux_pane_owner_id ?? undefined,
+                     config.hud_pane_id ?? undefined,
+                   );
           }),
         );
         if (allDrained.every(Boolean)) break;
@@ -1996,18 +2003,44 @@ export async function scaleDown(
             }
           }
 
-          const targetPaneIds = removableWorkers
-            .map((worker) => worker.pane_id)
-            .filter((paneId): paneId is string => typeof paneId === 'string' && paneId.trim().length > 0);
+          // PID-less rollback records are cleanup debt, not effect authority. A
+          // fresh gone proof may resolve one, but a live or unavailable proof
+          // must remain debt rather than letting teardown adopt its current PID.
+          const pinnedPaneWorkers = removableWorkers.filter((worker): worker is WorkerInfo & {
+            pane_id: string;
+            pid: number;
+          } => (
+            typeof worker.pane_id === 'string'
+            && /^%\d+$/.test(worker.pane_id)
+            && typeof worker.pid === 'number'
+            && Number.isSafeInteger(worker.pid)
+            && worker.pid > 0
+          ));
+          const unpinnedPaneWorkers = removableWorkers.filter((worker) => (
+            typeof worker.pane_id === 'string'
+            && /^%\d+$/.test(worker.pane_id)
+            && !pinnedPaneWorkers.some((pinnedWorker) => pinnedWorker.name === worker.name)
+          ));
+          const unpinnedResolvedPaneIds = new Set<string>();
+          const unpinnedProofDebt: string[] = [];
+          for (const worker of unpinnedPaneWorkers) {
+            const proof = readExactPaneProofSync(worker.pane_id!);
+            if (proof.status === 'gone') {
+              unpinnedResolvedPaneIds.add(worker.pane_id!);
+            } else if (proof.status === 'unavailable') {
+              unpinnedProofDebt.push(`${worker.pane_id}:${proof.reason}`);
+            } else {
+              unpinnedProofDebt.push(`${worker.pane_id}:legacy_pid_missing_live`);
+            }
+          }
+          const targetPaneIds = pinnedPaneWorkers.map((worker) => worker.pane_id);
           const expectedScaleDownOwnerId = typeof config.tmux_pane_owner_id === 'string'
             ? config.tmux_pane_owner_id.trim()
             : '';
           const paneTeardown = await teardownWorkerPanes(targetPaneIds, {
             leaderPaneId: config.leader_pane_id,
             hudPaneId: config.hud_pane_id,
-            expectedPanePids: Object.fromEntries(removableWorkers
-              .filter((worker) => typeof worker.pane_id === 'string' && typeof worker.pid === 'number')
-              .map((worker) => [worker.pane_id as string, worker.pid as number])),
+            expectedPanePids: Object.fromEntries(pinnedPaneWorkers.map((worker) => [worker.pane_id, worker.pid])),
             authorizePaneKill: (paneId) => {
               const currentOwner = readPaneTeamOwnerTagResult(paneId);
               return Boolean(expectedScaleDownOwnerId)
@@ -2015,13 +2048,17 @@ export async function scaleDown(
                 && currentOwner.value === expectedScaleDownOwnerId;
             },
           });
-          const resolvedPaneIds = new Set([...paneTeardown.provenGonePaneIds, ...paneTeardown.killedPaneIds]);
+          const resolvedPaneIds = new Set([
+            ...unpinnedResolvedPaneIds,
+            ...paneTeardown.provenGonePaneIds,
+            ...paneTeardown.killedPaneIds,
+          ]);
           const unresolvedWorkers = removableWorkers.filter((worker) => (
             typeof worker.pane_id === 'string' && !resolvedPaneIds.has(worker.pane_id)
           ));
           if (unresolvedWorkers.length > 0) {
             await restorePriorWorkerStatuses(unresolvedWorkers);
-            const proofDebt = paneTeardown.proofUnavailable.map((proof) => `${proof.paneId}:${proof.reason}`);
+            const proofDebt = [...unpinnedProofDebt, ...paneTeardown.proofUnavailable.map((proof) => `${proof.paneId}:${proof.reason}`)];
             const killDebt = paneTeardown.kill.failedPaneIds.map((paneId) => `${paneId}:kill_failed`);
             await writeAtomic(cleanupDebtPath, JSON.stringify({
               ...cleanupDebtBase,

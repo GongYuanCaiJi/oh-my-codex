@@ -1,6 +1,6 @@
 import { spawnSync, execFile } from 'child_process';
 import { promisify } from 'util';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import {
@@ -38,6 +38,7 @@ import {
 } from '../utils/platform-command.js';
 import { resolveOmxCliEntryPath } from '../utils/paths.js';
 import { readExactPaneProof, readExactPaneProofSync, type ExactPaneProof } from './exact-pane.js';
+import { resolveCanonicalTeamStateRoot } from './state-root.js';
 
 const execFileAsync = promisify(execFile);
 import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_TEAM_HEIGHT_LINES } from '../hud/constants.js';
@@ -116,6 +117,8 @@ export interface RestoreStandaloneHudPaneOptions {
   expectedLeaderPanePid?: number;
   /** Shared-session authorization recheck performed immediately before leader-targeted operations. */
   assertLeaderPaneAuthorization?: () => void;
+  /** Canonical state root for durable restored-HUD cleanup debt. */
+  stateRoot?: string | null;
 }
 
 const INJECTION_MARKER = '[OMX_TMUX_INJECT]';
@@ -210,6 +213,7 @@ function runTmux(args: string[]): { ok: true; stdout: string } | { ok: false; st
 }
 
 /** Preserve structured tmux fields, including an empty final field. */
+/** Preserve structured tmux fields, including an empty final field. */
 function runTmuxStructured(args: string[]): { ok: true; stdout: string } | { ok: false; stderr: string } {
   const { result } = spawnPlatformCommandSync('tmux', args, { encoding: 'utf-8' });
   if (result.error) return { ok: false, stderr: result.error.message };
@@ -217,6 +221,59 @@ function runTmuxStructured(args: string[]): { ok: true; stdout: string } | { ok:
     return { ok: false, stderr: (result.stderr || '').trim() || `tmux exited ${result.status}` };
   }
   return { ok: true, stdout: (result.stdout || '').replace(/\r?\n$/, '') };
+}
+
+type RestoredHudCleanupDebt = {
+  schema_version: 1;
+  operation: 'restored_hud_cleanup';
+  pane_id: string;
+  pane_pid: number | null;
+  leader_pane_id: string;
+  leader_pane_pid: number;
+};
+
+function restoredHudCleanupDebtPath(cwd: string, stateRoot?: string | null): string {
+  const root = typeof stateRoot === 'string' && stateRoot.trim()
+    ? resolve(stateRoot)
+    : resolveCanonicalTeamStateRoot(resolve(cwd));
+  return join(root, '.restored-hud-cleanup-debt.json');
+}
+
+function persistRestoredHudCleanupDebtSync(
+  cwd: string,
+  debt: RestoredHudCleanupDebt,
+  stateRoot?: string | null,
+): void {
+  const debtPath = restoredHudCleanupDebtPath(cwd, stateRoot);
+  mkdirSync(dirname(debtPath), { recursive: true });
+  const temporaryPath = `${debtPath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temporaryPath, `${JSON.stringify(debt)}\n`, { mode: 0o600 });
+  renameSync(temporaryPath, debtPath);
+}
+
+function clearRestoredHudCleanupDebtIfProvenGoneSync(cwd: string, stateRoot?: string | null): void {
+  const debtPath = restoredHudCleanupDebtPath(cwd, stateRoot);
+  if (!existsSync(debtPath)) return;
+  let debt: RestoredHudCleanupDebt;
+  try {
+    debt = JSON.parse(readFileSync(debtPath, 'utf8')) as RestoredHudCleanupDebt;
+  } catch {
+    throw new Error('restored_hud_cleanup_debt_malformed');
+  }
+  if (debt.schema_version !== 1 || debt.operation !== 'restored_hud_cleanup'
+    || !hasExplicitWorkerPaneId(debt.pane_id)
+    || !hasExplicitWorkerPaneId(debt.leader_pane_id)
+    || !Number.isSafeInteger(debt.leader_pane_pid) || debt.leader_pane_pid <= 0
+    || (debt.pane_pid !== null && (!Number.isSafeInteger(debt.pane_pid) || debt.pane_pid <= 0))) {
+    throw new Error('restored_hud_cleanup_debt_malformed');
+  }
+  const proof = readExactPaneProofSync(debt.pane_id);
+  if (proof.status === 'gone') {
+    unlinkSync(debtPath);
+    return;
+  }
+  // A live PID-less obligation is debt, never authority to kill or mutate the pane.
+  throw new Error(`restored_hud_cleanup_debt_unresolved:${debt.pane_id}`);
 }
 
 
@@ -758,6 +815,26 @@ async function capturePaneAsync(resolveTarget: AsyncPaneTargetResolver): Promise
   return result.stdout;
 }
 
+/** Capture an explicit Team worker pane only after PID-owner-PID authorization. */
+export async function captureWorkerPane(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId: string,
+  expectedPanePid: number,
+  expectedTeamOwnerId: string,
+  hudPaneId?: string,
+): Promise<string> {
+  const resolveTarget = createPinnedWorkerPaneTargetResolver(
+    sessionName,
+    workerIndex,
+    workerPaneId,
+    expectedPanePid,
+    expectedTeamOwnerId,
+    hudPaneId,
+  );
+  return capturePaneAsync(resolveTarget);
+}
+
 async function captureVisiblePaneAsync(resolveTarget: AsyncPaneTargetResolver): Promise<string> {
   const target = await resolveTarget();
   if (!target) return '';
@@ -770,13 +847,23 @@ async function isWorkerAliveAsync(
   sessionName: string,
   workerIndex: number,
   workerPaneId?: string,
+  expectedPanePid?: number,
+  expectedTeamOwnerId?: string,
+  hudPaneId?: string,
   resolveTarget?: AsyncPaneTargetResolver,
 ): Promise<boolean> {
   if (hasExplicitWorkerPaneId(workerPaneId)) {
-    const resolver = resolveTarget ?? createPinnedWorkerPaneTargetResolver(sessionName, workerIndex, workerPaneId);
+    const resolver = resolveTarget ?? createPinnedWorkerPaneTargetResolver(
+      sessionName,
+      workerIndex,
+      workerPaneId,
+      expectedPanePid,
+      expectedTeamOwnerId,
+      hudPaneId,
+    );
     const target = await resolver();
-    const pid = resolver.lastResolvedPid?.();
-    if (!target || typeof pid !== 'number') return false;
+    const pid = resolver.lastResolvedPid?.() ?? expectedPanePid;
+    if (!target || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return false;
     try {
       process.kill(pid, 0);
       return true;
@@ -947,7 +1034,7 @@ function buildAuthoritativeHudResizeShellCommand(
   const expectedPid = typeof expectedPanePid === 'number' && Number.isSafeInteger(expectedPanePid) && expectedPanePid > 0
     ? ` && $3 == "${expectedPanePid}"`
     : '';
-  const proof = `awk -F '\\t' -v pane='${target}' 'NF != 3 || $1 !~ /^%[0-9]+$/ || ($2 != "0" && $2 != "1") || $3 !~ /^[1-9][0-9]*$/ || length($3) > 16 || (length($3) == 16 && ("x" $3) > "x9007199254740991") || seen[$1]++ { bad = 1 } $1 == pane && $2 == "0"${expectedPid} { live = 1 } END { exit bad || !live }'`;
+  const proof = `awk -F '\\t' -v pane='${target}' 'NF != 3 || $1 !~ /^%[0-9]+$/ || ($2 != "0" && $2 != "1") || (seen[$1]++) || ($1 == pane && ($3 !~ /^[1-9][0-9]*$/ || length($3) > 16 || (length($3) == 16 && ("x" $3) > "x9007199254740991"))) || ($1 != pane && $3 != "" && ($3 !~ /^[1-9][0-9]*$/ || length($3) > 16 || (length($3) == 16 && ("x" $3) > "x9007199254740991"))) { bad = 1 } $1 == pane && $2 == "0"${expectedPid} { live = 1 } END { exit bad || !live }'`;
   const expectedOwner = expectedPaneOwnerId?.trim();
   if (!expectedOwner) {
     return `if snapshot=$(${snapshot}); then printf '%s\\n' "$snapshot" | ${proof} && ${effectCommand}; fi`;
@@ -2136,13 +2223,17 @@ export function createTeamSession(
       if (hudResult.ok) {
         const id = hudResult.stdout.split('\n')[0]?.trim() ?? '';
         if (id.startsWith('%')) {
+          // split-window has created a concrete pane even though no proof has
+          // authorized an effect yet. Retain PID-less cleanup debt first.
+          rollbackPanes.set(id, null);
+          partialHudPaneId = id;
+          partialHudPanePid = null;
           const hudProof = readExactPaneProofSync(id);
           if (hudProof.status === 'unavailable') throw new ExactPaneProofUnavailableError(hudProof);
           if (hudProof.status === 'gone') throw new Error(`tmux pane is not proven live: ${id}`);
           const hudPanePid = hudProof.pid;
           frozenWindowPanePids.set(id, hudPanePid);
           rollbackPanes.set(id, hudPanePid);
-          partialHudPaneId = id;
           partialHudPanePid = hudPanePid;
           if (isNativeWindows() && !waitForPaneToRemainPresent(teamTarget, id)) {
             throw new Error(`HUD pane did not remain present after tmux split-window returned ${id}`);
@@ -2392,6 +2483,7 @@ export function restoreStandaloneHudPane(
 ): string | null {
   const normalizedLeaderPaneId = normalizePaneTarget(leaderPaneId);
   if (!normalizedLeaderPaneId) return null;
+  clearRestoredHudCleanupDebtIfProvenGoneSync(cwd, options.stateRoot);
 
   const omxEntry = resolveOmxCliEntryPath();
   if (!omxEntry || omxEntry.trim() === '') return null;
@@ -2489,6 +2581,14 @@ export function restoreStandaloneHudPane(
 
   const paneId = hudResult.stdout.split('\n')[0]?.trim() ?? '';
   if (!paneId.startsWith('%')) return null;
+  persistRestoredHudCleanupDebtSync(cwd, {
+    schema_version: 1,
+    operation: 'restored_hud_cleanup',
+    pane_id: paneId,
+    pane_pid: null,
+    leader_pane_id: normalizedLeaderPaneId,
+    leader_pane_pid: options.expectedLeaderPanePid ?? leaderPanePid,
+  }, options.stateRoot);
 
   const hudPanePid = (() => {
     const proof = readExactPaneProofSync(paneId);
@@ -2496,6 +2596,14 @@ export function restoreStandaloneHudPane(
     if (proof.status === 'gone') throw new Error(`tmux pane is not proven live: ${paneId}`);
     return proof.pid;
   })();
+  persistRestoredHudCleanupDebtSync(cwd, {
+    schema_version: 1,
+    operation: 'restored_hud_cleanup',
+    pane_id: paneId,
+    pane_pid: hudPanePid,
+    leader_pane_id: normalizedLeaderPaneId,
+    leader_pane_pid: options.expectedLeaderPanePid ?? leaderPanePid,
+  }, options.stateRoot);
   if (isNativeWindows()) {
     const exactHudPaneId = requireLiveExactPaneSync(paneId, hudPanePid);
     requireAuthorizedLeaderPane();
@@ -2513,6 +2621,7 @@ export function restoreStandaloneHudPane(
     runTmux(buildReconcileHudResizeArgs(paneId, HUD_TMUX_TEAM_HEIGHT_LINES, hudPanePid));
   }
   runTmux(['select-pane', '-t', requireAuthorizedLeaderPane()]);
+  unlinkSync(restoredHudCleanupDebtPath(cwd, options.stateRoot));
   return paneId;
 }
 
@@ -3192,10 +3301,24 @@ export function notifyLeaderStatus(sessionName: string, message: string): boolea
 }
 
 // Get PID of the shell process in a worker's tmux pane
-export function getWorkerPanePid(sessionName: string, workerIndex: number, workerPaneId?: string): number | null {
+export function getWorkerPanePid(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId?: string,
+  expectedPanePid?: number,
+  expectedTeamOwnerId?: string,
+  hudPaneId?: string,
+): number | null {
   if (hasExplicitWorkerPaneId(workerPaneId)) {
-    const proof = readExactPaneProofSync(workerPaneId);
-    return proof.status === 'live' ? proof.pid : null;
+    const target = createPinnedWorkerPaneTargetResolverSync(
+      sessionName,
+      workerIndex,
+      workerPaneId,
+      expectedPanePid,
+      expectedTeamOwnerId,
+      hudPaneId,
+    )();
+    return target ? expectedPanePid ?? null : null;
   }
 
   const result = runTmux(['list-panes', '-t', paneTarget(sessionName, workerIndex), '-F', '#{pane_pid}']);
@@ -3209,18 +3332,34 @@ export function getWorkerPanePid(sessionName: string, workerIndex: number, worke
   return pid;
 }
 
+
 // Check if worker's tmux pane has a running process
-export function isWorkerAlive(sessionName: string, workerIndex: number, workerPaneId?: string): boolean {
+export function isWorkerAlive(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId?: string,
+  expectedPanePid?: number,
+  expectedTeamOwnerId?: string,
+  hudPaneId?: string,
+): boolean {
   if (hasExplicitWorkerPaneId(workerPaneId)) {
-    const proof = readExactPaneProofSync(workerPaneId);
-    if (proof.status !== 'live') return false;
+    const target = createPinnedWorkerPaneTargetResolverSync(
+      sessionName,
+      workerIndex,
+      workerPaneId,
+      expectedPanePid,
+      expectedTeamOwnerId,
+      hudPaneId,
+    )();
+    if (!target || typeof expectedPanePid !== 'number') return false;
     try {
-      process.kill(proof.pid, 0);
+      process.kill(expectedPanePid, 0);
       return true;
     } catch {
       return false;
     }
   }
+
 
   const result = runTmux([
     'list-panes',
@@ -3250,9 +3389,23 @@ export function isWorkerAlive(sessionName: string, workerIndex: number, workerPa
   }
 }
 
-export function isWorkerPaneOpen(sessionName: string, workerIndex: number, workerPaneId?: string): boolean {
+export function isWorkerPaneOpen(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId?: string,
+  expectedPanePid?: number,
+  expectedTeamOwnerId?: string,
+  hudPaneId?: string,
+): boolean {
   if (hasExplicitWorkerPaneId(workerPaneId)) {
-    return readExactPaneProofSync(workerPaneId).status === 'live';
+    return createPinnedWorkerPaneTargetResolverSync(
+      sessionName,
+      workerIndex,
+      workerPaneId,
+      expectedPanePid,
+      expectedTeamOwnerId,
+      hudPaneId,
+    )() !== null;
   }
 
   const result = runTmux([
@@ -3287,7 +3440,7 @@ export async function killWorker(
   await runTmuxAsync(['send-keys', '-t', initialTarget, 'C-c']);
   await sleep(1000);
 
-  if (await isWorkerAliveAsync(sessionName, workerIndex, workerPaneId, resolveTarget)) {
+  if (await isWorkerAliveAsync(sessionName, workerIndex, workerPaneId, expectedPanePid, expectedTeamOwnerId, hudPaneId, resolveTarget)) {
     const exitTarget = await resolveTarget();
     if (exitTarget) {
       await runTmuxAsync(['send-keys', '-t', exitTarget, 'C-d']);
@@ -3295,28 +3448,45 @@ export async function killWorker(
     }
   }
 
-  if (await isWorkerAliveAsync(sessionName, workerIndex, workerPaneId, resolveTarget)) {
+  if (await isWorkerAliveAsync(sessionName, workerIndex, workerPaneId, expectedPanePid, expectedTeamOwnerId, hudPaneId, resolveTarget)) {
     const killTarget = await resolveTarget();
-    if (killTarget) await runTmuxAsync(['kill-pane', '-t', killTarget]);
+    if (!killTarget) return;
+    const killed = await runTmuxAsync(['kill-pane', '-t', killTarget]);
+    if (!killed.ok) throw new Error(`failed to kill tmux pane ${killTarget}: ${killed.stderr}`);
+    const absence = await readExactPaneProof(killTarget);
+    if (absence.status === 'unavailable') throw new ExactPaneProofUnavailableError(absence);
+    if (absence.status !== 'gone') throw new Error(`tmux pane remains live after kill: ${killTarget}`);
   }
 }
 
-// Explicit pane targets require their previously frozen positive PID. Blank pane
-// IDs remain absent compatibility values and never issue a direct pane effect.
+// Explicit pane targets require frozen PID, canonical Team owner, and HUD
+// exclusion. A successful kill is only accepted after a fresh absence proof.
 export function killWorkerByPaneId(
   workerPaneId: string,
   expectedPanePid?: number,
   leaderPaneId?: string,
+  expectedTeamOwnerId?: string,
+  hudPaneId?: string,
 ): void {
+  const expectedOwner = typeof expectedTeamOwnerId === 'string' ? expectedTeamOwnerId.trim() : '';
   if (!hasExplicitWorkerPaneId(workerPaneId)
     || typeof expectedPanePid !== 'number'
     || !Number.isSafeInteger(expectedPanePid)
-    || expectedPanePid <= 0) return;
-  // Guard: never kill the leader's own pane.
+    || expectedPanePid <= 0
+    || !expectedOwner
+    || workerPaneId === hudPaneId) return;
   if (leaderPaneId && workerPaneId === leaderPaneId) return;
   const proof = readExactPaneProofSync(workerPaneId);
   if (proof.status !== 'live' || proof.pid !== expectedPanePid) return;
-  runTmux(['kill-pane', '-t', proof.paneId]);
+  const owner = readPaneTeamOwnerTagResult(proof.paneId);
+  if (owner.status !== 'value' || owner.value !== expectedOwner) return;
+  const finalProof = readExactPaneProofSync(proof.paneId);
+  if (finalProof.status !== 'live' || finalProof.pid !== expectedPanePid) return;
+  const result = runTmux(['kill-pane', '-t', finalProof.paneId]);
+  if (!result.ok) throw new Error(`failed to kill tmux pane ${finalProof.paneId}: ${result.stderr}`);
+  const absence = readExactPaneProofSync(finalProof.paneId);
+  if (absence.status === 'unavailable') throw new ExactPaneProofUnavailableError(absence);
+  if (absence.status !== 'gone') throw new Error(`tmux pane remains live after kill: ${finalProof.paneId}`);
 }
 
 export function paneHasOmxInstanceTag(paneId: string | null | undefined, instanceId: string | null | undefined): boolean {
@@ -3376,16 +3546,28 @@ export async function killWorkerByPaneIdAsync(
   workerPaneId: string,
   expectedPanePid?: number,
   leaderPaneId?: string,
+  expectedTeamOwnerId?: string,
+  hudPaneId?: string,
 ): Promise<void> {
+  const expectedOwner = typeof expectedTeamOwnerId === 'string' ? expectedTeamOwnerId.trim() : '';
   if (!hasExplicitWorkerPaneId(workerPaneId)
     || typeof expectedPanePid !== 'number'
     || !Number.isSafeInteger(expectedPanePid)
-    || expectedPanePid <= 0) return;
-  // Guard: never kill the leader's own pane.
+    || expectedPanePid <= 0
+    || !expectedOwner
+    || workerPaneId === hudPaneId) return;
   if (leaderPaneId && workerPaneId === leaderPaneId) return;
   const proof = await readExactPaneProof(workerPaneId);
   if (proof.status !== 'live' || proof.pid !== expectedPanePid) return;
-  await runTmuxAsync(['kill-pane', '-t', proof.paneId]);
+  const owner = readPaneTeamOwnerTagResult(proof.paneId);
+  if (owner.status !== 'value' || owner.value !== expectedOwner) return;
+  const finalProof = await readExactPaneProof(proof.paneId);
+  if (finalProof.status !== 'live' || finalProof.pid !== expectedPanePid) return;
+  const result = await runTmuxAsync(['kill-pane', '-t', finalProof.paneId]);
+  if (!result.ok) throw new Error(`failed to kill tmux pane ${finalProof.paneId}: ${result.stderr}`);
+  const absence = await readExactPaneProof(finalProof.paneId);
+  if (absence.status === 'unavailable') throw new ExactPaneProofUnavailableError(absence);
+  if (absence.status !== 'gone') throw new Error(`tmux pane remains live after kill: ${finalProof.paneId}`);
 }
 
 export interface PaneTeardownSummary {
@@ -3704,7 +3886,16 @@ export async function teardownWorkerPanes(
       summary.proofUnavailable.push(proof);
       break;
     }
-    if (typeof expectedPid === 'number' && proof.pid !== expectedPid) {
+    if (typeof expectedPid !== 'number' || !Number.isSafeInteger(expectedPid) || expectedPid <= 0) {
+      summary.proofUnavailable.push({
+        status: 'unavailable',
+        paneId,
+        reason: 'pane_pid_changed',
+        detail: 'expected positive pane PID is required before teardown kill',
+      });
+      break;
+    }
+    if (proof.pid !== expectedPid) {
       summary.proofUnavailable.push({
         status: 'unavailable',
         paneId,
@@ -3735,7 +3926,7 @@ export async function teardownWorkerPanes(
       summary.proofUnavailable.push(finalProof);
       break;
     }
-    if (typeof expectedPid === 'number' && finalProof.pid !== expectedPid) {
+    if (finalProof.pid !== expectedPid) {
       summary.proofUnavailable.push({
         status: 'unavailable',
         paneId: finalProof.paneId,
@@ -3778,8 +3969,14 @@ export async function killWorkerPanes(
   leaderPaneId: string,
   graceMs: number = 2000,
   hudPaneId?: string,
+  expectedPanePids?: Readonly<Record<string, number>>,
 ): Promise<PaneTeardownSummary> {
-  return teardownWorkerPanes(paneIds, { leaderPaneId, hudPaneId: hudPaneId ?? null, graceMs });
+  return teardownWorkerPanes(paneIds, {
+    leaderPaneId,
+    hudPaneId: hudPaneId ?? null,
+    graceMs,
+    expectedPanePids,
+  });
 }
 
 // Kill entire tmux session. Tolerates already-dead sessions.
