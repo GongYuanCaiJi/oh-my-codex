@@ -1525,7 +1525,8 @@ require('fs').writeFileSync(process.env.OMX_NON_CODEX_CAPTURE, process.argv.slic
           dirPrefix: 'omx-runtime-startup-window-bin-',
           tmuxScript: (tmuxLogPath) => `#!/bin/sh
 set -eu
-printf '%s\\n' "$*" >> "${tmuxLogPath}"
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+owner_path="${tmuxLogPath}.owner"
 case "$1" in
   --version|-V)
     echo "tmux 3.4"
@@ -1544,16 +1545,23 @@ case "$1" in
     ;;
   list-panes)
     case "$*" in
-      *"-F #{pane_id}"*"#{pane_current_command}"*)
+      *"-t leader:0 -F "*'#{pane_id}'*'#{pane_current_command}'*'#{pane_start_command}'*)
+        team_owner=''
+        if [ -f "$owner_path" ]; then IFS= read -r team_owner < "$owner_path" || true; fi
+        team_name="\${team_owner#team:}"
         printf "%%1\\tzsh\\tzsh\\n"
+        if [ ! -f "${tmuxLogPath}.killed-%2" ]; then
+          printf "%%2\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=\${team_name}/worker-1 codex\\n"
+        fi
         exit 0
+        ;;
+      *"-a -F #{pane_id}"*)
+        printf "%%1\t0\t2000004321\n"
+        if [ ! -f "${tmuxLogPath}.killed-%2" ]; then printf "%%2\t0\t2000004321\n"; fi
+        if [ ! -f "${tmuxLogPath}.killed-%3" ]; then printf "%%3\t0\t2000004321\n"; fi
         ;;
       *"#{pane_pid}"*)
         echo "2000004321"
-        exit 0
-        ;;
-      *"#{pane_dead} #{pane_pid}"*)
-        echo "0 2000004321"
         exit 0
         ;;
       *)
@@ -1576,7 +1584,12 @@ case "$1" in
     printf 'OpenAI Codex\\n> '
     exit 0
     ;;
-  send-keys|resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell|kill-pane|kill-session)
+  set-option)
+    if [ "\${5:-}" = "@omx_team_pane_owner_id" ]; then printf '%s' "\${6:-}" > "$owner_path"; fi
+    exit 0
+    ;;
+  kill-pane)
+    : > "${tmuxLogPath}.killed-$3"
     exit 0
     ;;
   *)
@@ -1689,7 +1702,8 @@ esac
           dirPrefix: 'omx-runtime-startup-no-evidence-bin-',
           tmuxScript: (tmuxLogPath) => `#!/bin/sh
 set -eu
-printf '%s\\n' "$*" >> "${tmuxLogPath}"
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+owner_path="${tmuxLogPath}.owner"
 case "$1" in
   -V)
     echo "tmux 3.4"
@@ -1708,16 +1722,23 @@ case "$1" in
     ;;
   list-panes)
     case "$*" in
-      *"-F #{pane_id}"*"#{pane_current_command}"*)
+      *"-t leader:0 -F "*'#{pane_id}'*'#{pane_current_command}'*'#{pane_start_command}'*)
+        team_owner=''
+        if [ -f "$owner_path" ]; then IFS= read -r team_owner < "$owner_path" || true; fi
+        team_name="\${team_owner#team:}"
         printf "%%1\\tzsh\\tzsh\\n"
+        if [ ! -f "${tmuxLogPath}.killed-%2" ]; then
+          printf "%%2\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=\${team_name}/worker-1 codex\\n"
+        fi
         exit 0
+        ;;
+      *"-a -F #{pane_id}"*)
+        printf "%%1\t0\t2000004321\n"
+        if [ ! -f "${tmuxLogPath}.killed-%2" ]; then printf "%%2\t0\t2000004321\n"; fi
+        if [ ! -f "${tmuxLogPath}.killed-%3" ]; then printf "%%3\t0\t2000004321\n"; fi
         ;;
       *"#{pane_pid}"*)
         echo "2000004321"
-        exit 0
-        ;;
-      *"#{pane_dead} #{pane_pid}"*)
-        echo "0 2000004321"
         exit 0
         ;;
       *)
@@ -1740,7 +1761,12 @@ case "$1" in
     printf 'OpenAI Codex\\n> '
     exit 0
     ;;
-  send-keys|resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell|kill-pane|kill-session)
+  set-option)
+    if [ "\${5:-}" = "@omx_team_pane_owner_id" ]; then printf '%s' "\${6:-}" > "$owner_path"; fi
+    exit 0
+    ;;
+  kill-pane)
+    : > "${tmuxLogPath}.killed-$3"
     exit 0
     ;;
   *)
@@ -2132,7 +2158,8 @@ process.on('SIGTERM', () => process.exit(0));`,
           dirPrefix: 'omx-runtime-pane-derived-owner-bin-',
           tmuxScript: (tmuxLogPath) => `#!/bin/sh
 set -eu
-printf '%s\\n' "$*" >> "${tmuxLogPath}"
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+owner_path="${tmuxLogPath}.owner"
 case "\${1:-}" in
   -V)
     echo "tmux 3.4"
@@ -2154,8 +2181,16 @@ case "\${1:-}" in
       *"-t %2 -F #{pane_pid}"*)
         echo "2000002222"
         ;;
+      *"-a -F #{pane_id}"*)
+        printf "%%1\t0\t2000001111\n"
+        if [ ! -f "${tmuxLogPath}.killed-%2" ]; then printf "%%2\t0\t2000002222\n"; fi
+        printf "%%3\t0\t2000003333\n"
+        ;;
       *"pane_current_command"*)
-        printf "%%1\\tnode\\t'codex'\\n"
+        team_owner=''
+        if [ -f "$owner_path" ]; then IFS= read -r team_owner < "$owner_path" || true; fi
+        team_name="\${team_owner#team:}"
+        printf "%%1\\tnode\\t'codex'\\n%%2\\tgemini\\tenv OMX_TEAM_INTERNAL_WORKER=\${team_name}/worker-1 gemini\\n"
         ;;
       *)
         printf "%%1\\n"
@@ -2166,6 +2201,7 @@ case "\${1:-}" in
   split-window)
     case "$*" in
       *" -h "*)
+        rm -f "${tmuxLogPath}.killed-%2"
         echo "%2"
         ;;
       *)
@@ -2174,7 +2210,15 @@ case "\${1:-}" in
     esac
     exit 0
     ;;
-  set-option|resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell|send-keys|kill-pane|kill-session)
+  set-option)
+    if [ "\${5:-}" = "@omx_team_pane_owner_id" ]; then printf '%s' "\${6:-}" > "$owner_path"; fi
+    exit 0
+    ;;
+  kill-pane)
+    : > "${tmuxLogPath}.killed-\${3:-unknown}"
+    exit 0
+    ;;
+  resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell|send-keys|kill-session)
     exit 0
     ;;
   *)
@@ -2265,7 +2309,8 @@ esac
           dirPrefix: 'omx-runtime-pane-owner-env-isolated-bin-',
           tmuxScript: (tmuxLogPath) => `#!/bin/sh
 set -eu
-printf '%s\\n' "$*" >> "${tmuxLogPath}"
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+owner_path="${tmuxLogPath}.owner"
 case "\${1:-}" in
   -V)
     echo "tmux 3.4"
@@ -2287,8 +2332,16 @@ case "\${1:-}" in
       *"-t %2 -F #{pane_pid}"*)
         echo "2000002222"
         ;;
+      *"-a -F #{pane_id}"*)
+        printf "%%1\t0\t2000001111\n"
+        if [ ! -f "${tmuxLogPath}.killed-%2" ]; then printf "%%2\t0\t2000002222\n"; fi
+        printf "%%3\t0\t2000003333\n"
+        ;;
       *"pane_current_command"*)
-        printf "%%1\\tnode\\t'codex'\\n"
+        team_owner=''
+        if [ -f "$owner_path" ]; then IFS= read -r team_owner < "$owner_path" || true; fi
+        team_name="\${team_owner#team:}"
+        printf "%%1\\tnode\\t'codex'\\n%%2\\tgemini\\tenv OMX_TEAM_INTERNAL_WORKER=\${team_name}/worker-1 gemini\\n"
         ;;
       *)
         printf "%%1\\n"
@@ -2299,6 +2352,7 @@ case "\${1:-}" in
   split-window)
     case "$*" in
       *" -h "*)
+        rm -f "${tmuxLogPath}.killed-%2"
         echo "%2"
         ;;
       *)
@@ -2315,7 +2369,15 @@ case "\${1:-}" in
     esac
     exit 0
     ;;
-  set-option|resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell|send-keys|kill-pane|kill-session)
+  set-option)
+    if [ "\${5:-}" = "@omx_team_pane_owner_id" ]; then printf '%s' "\${6:-}" > "$owner_path"; fi
+    exit 0
+    ;;
+  kill-pane)
+    : > "${tmuxLogPath}.killed-\${3:-unknown}"
+    exit 0
+    ;;
+  resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell|send-keys|kill-session)
     exit 0
     ;;
   *)
@@ -2408,7 +2470,8 @@ esac
           dirPrefix: 'omx-runtime-win32-no-env-',
           tmuxScript: (tmuxLogPath) => `#!/bin/sh
 set -eu
-printf '%s\\n' "$*" >> "${tmuxLogPath}"
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+owner_path="${tmuxLogPath}.owner"
 case "\${1:-}" in
   -V)
     echo "tmux 3.4"
@@ -2427,6 +2490,12 @@ case "\${1:-}" in
     ;;
   list-panes)
     case "$*" in
+      *"-t leader:0 -F "*'#{pane_id}'*'#{pane_current_command}'*'#{pane_start_command}'*)
+        team_owner=''
+        if [ -f "$owner_path" ]; then IFS= read -r team_owner < "$owner_path" || true; fi
+        team_name="\${team_owner#team:}"
+        printf "%%1\\tnode\\t'codex'\\n%%2\\tgemini\\tenv OMX_TEAM_INTERNAL_WORKER=\${team_name}/worker-1 gemini\\n%%3\\tnode\\t'node omx hud --watch'\\n"
+        ;;
       *"-a -F #{pane_id}"*)
         printf '%s\n' 'dedicated-strict-native-win32-global-proof' >> "${tmuxLogPath}"
         printf "%%1\t0\t2000000001\n"
@@ -2456,6 +2525,10 @@ case "\${1:-}" in
     ;;
   kill-pane)
     : > "${tmuxLogPath}.killed-$3"
+    exit 0
+    ;;
+  set-option)
+    if [ "\${5:-}" = "@omx_team_pane_owner_id" ]; then printf '%s' "\${6:-}" > "$owner_path"; fi
     exit 0
     ;;
   resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell)
@@ -4894,6 +4967,10 @@ hud_state="${tmuxLogPath}.hud-state"
 if [ ! -f "$hud_state" ]; then
   printf 'absent' > "$hud_state"
 fi
+worker_state="${tmuxLogPath}.worker-state"
+if [ ! -f "$worker_state" ]; then
+  printf 'present' > "$worker_state"
+fi
 case "\${1:-}" in
   -V)
     echo "tmux 3.4"
@@ -4912,8 +4989,20 @@ case "\${1:-}" in
     ;;
   list-panes)
     case "$*" in
+      *"-t leader:0 -F "*'#{pane_id}'*'#{pane_current_command}'*'#{pane_start_command}'*)
+        printf "%%1\\tnode\\t'codex'\\n"
+        if [ "$(cat "$worker_state")" != "absent" ]; then
+          printf "%%2\\tgemini\\tenv OMX_TEAM_INTERNAL_WORKER=team-rerun-hud-6aa4d480/worker-1 gemini\\n"
+        fi
+        if [ "$(cat "$hud_state")" != "absent" ]; then
+          printf "%%3\\tnode\\texec env OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%%1' node /tmp/bin/omx.js hud --watch\\n"
+        fi
+        ;;
       *"-a -F #{pane_id}"*)
-        printf "%%1\t0\t2000999998\n%%2\t0\t2000999999\n"
+        printf "%%1\t0\t2000999998\n"
+        if [ "$(cat "$worker_state")" != "absent" ]; then
+          printf "%%2\t0\t2000999999\n"
+        fi
         if [ "$(cat "$hud_state")" != "absent" ]; then
           printf "%%3\t0\t2000999997\n"
         fi
@@ -4940,6 +5029,8 @@ case "\${1:-}" in
   split-window)
     case "$*" in
       *" -h "*)
+        rm -f "${tmuxLogPath}.killed-%2"
+        printf 'present' > "$worker_state"
         echo "%2"
         ;;
       *" -f "*)
@@ -4969,6 +5060,7 @@ case "\${1:-}" in
     ;;
   kill-pane)
     case "$*" in
+      *"%2"*) printf 'absent' > "$worker_state" ;;
       *"%3"*) printf 'absent' > "$hud_state" ;;
     esac
     exit 0
@@ -5418,6 +5510,64 @@ process.on('SIGTERM', () => {
       if (runtime) {
         await shutdownTeam(runtime.teamName, cwd, { force: true }).catch(() => {});
       }
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('shutdownTeam preserves generic prompt-worker state when process-group liveness is unknown', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-prompt-unknown-pid-'));
+    const binDir = join(cwd, 'bin');
+    const fakeCodexPath = join(binDir, 'codex');
+    const originalProcessKill = process.kill;
+    const originalDateNow = Date.now;
+    let runtime: TeamRuntime | null = null;
+    let workerPid = 0;
+    await mkdir(binDir, { recursive: true });
+    await writeFakePromptWorkerBinary(
+      fakeCodexPath,
+      `
+process.stdin.resume();
+setInterval(() => {}, 1000);
+process.on('SIGTERM', () => {});
+`,
+    );
+    try {
+      runtime = await withPromptModeCodexEnv(binDir, {}, () =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-prompt-unknown-pid',
+            'unknown prompt process-group teardown test',
+            'executor',
+            1,
+            [{ subject: 's', description: 'd', owner: 'worker-1' }],
+            cwd,
+          )));
+      workerPid = runtime.config.workers[0]?.pid ?? 0;
+      assert.ok(workerPid > 0);
+
+      let clock = originalDateNow();
+      Date.now = () => (clock += 10_000);
+      const positivePidSignals: Array<number | NodeJS.Signals | undefined> = [];
+      process.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+        if ((pid === -workerPid || pid === workerPid) && signal === 0) {
+          const error = new Error('permission denied') as NodeJS.ErrnoException;
+          error.code = 'EPERM';
+          throw error;
+        }
+        if (pid === workerPid && signal !== 0) positivePidSignals.push(signal);
+        return originalProcessKill(pid, signal as NodeJS.Signals);
+      }) as typeof process.kill;
+
+      await assert.rejects(
+        () => shutdownTeam(runtime!.teamName, cwd, { force: true }),
+        /shutdown_prompt_teardown_failed:worker-1:still_alive_after_sigkill/,
+      );
+      assert.ok(await readTeamConfig(runtime.teamName, cwd));
+      assert.equal(positivePidSignals.includes('SIGKILL'), false);
+    } finally {
+      process.kill = originalProcessKill;
+      Date.now = originalDateNow;
+      if (runtime) await shutdownTeam(runtime.teamName, cwd, { force: true }).catch(() => {});
       await rm(cwd, { recursive: true, force: true });
     }
   });
@@ -6867,6 +7017,93 @@ esac
     }
   });
 
+  it('shutdownTeam retains gone-pane descendant cleanup debt until tracked descendants exit', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-gone-pane-descendant-debt-'));
+    let descendant: ReturnType<typeof spawn> | null = null;
+    try {
+      descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      assert.ok(descendant.pid);
+      const teamName = 'team-gone-pane-descendant-debt';
+      await initTeamState(teamName, 'gone pane descendant cleanup debt test', 'executor', 1, cwd);
+      const config = await readTeamConfig(teamName, cwd);
+      assert.ok(config);
+      if (!config || !descendant.pid) return;
+      if (process.platform !== 'linux') return;
+      const stat = await readFile(`/proc/${descendant.pid}/stat`, 'utf8');
+      const startTime = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+      assert.match(startTime ?? '', /^[0-9]+$/);
+      const debtPath = join(cwd, '.omx', 'state', 'team', teamName, '.gone-pane-descendant-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'gone_pane_descendant_cleanup',
+        entries: [{
+          pane_id: '%404',
+          authorized_pane_pid: descendant.pid,
+          tracked_processes: [{ pid: descendant.pid, start_time: startTime! }],
+          evidence: 'pane_authority_lost_during_descendant_teardown',
+        }],
+      }), 'utf-8');
+
+      await assert.rejects(() => shutdownTeam(teamName, cwd, { force: true }), /gone_pane_descendant_cleanup_debt_unresolved:%404/);
+      assert.equal(existsSync(debtPath), true);
+      process.kill(descendant.pid, 'SIGKILL');
+      await new Promise((resolve) => descendant?.once('exit', resolve));
+      descendant = null;
+
+      await shutdownTeam(teamName, cwd, { force: true });
+      assert.equal(existsSync(debtPath), false);
+      assert.equal(existsSync(join(cwd, '.omx', 'state', 'team', teamName)), false);
+    } finally {
+      try {
+        if (descendant?.pid) process.kill(descendant.pid, 'SIGKILL');
+      } catch {}
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('shutdownTeam preserves identity-unavailable descendant debt when PID probing is unknown', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-gone-pane-unknown-probe-'));
+    const teamName = 'team-gone-probe';
+    try {
+      await initTeamState(teamName, 'unknown descendant probe debt test', 'executor', 1, cwd);
+      const debtPath = join(cwd, '.omx', 'state', 'team', teamName, '.gone-pane-descendant-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'gone_pane_descendant_cleanup',
+        entries: [{
+          pane_id: '%405',
+          authorized_pane_pid: process.pid,
+          tracked_pids: [process.pid],
+          evidence: 'process_identity_unavailable',
+        }],
+      }), 'utf-8');
+
+      const originalProcessKill = process.kill;
+      process.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+        if (pid === process.pid && signal === 0) {
+          const error = new Error('permission denied') as NodeJS.ErrnoException;
+          error.code = 'EPERM';
+          throw error;
+        }
+        return originalProcessKill(pid, signal as NodeJS.Signals);
+      }) as typeof process.kill;
+      try {
+        await assert.rejects(
+          () => shutdownTeam(teamName, cwd, { force: true }),
+          /gone_pane_descendant_cleanup_debt_unresolved:%405/,
+        );
+      } finally {
+        process.kill = originalProcessKill;
+      }
+
+      assert.equal(existsSync(debtPath), true);
+      const persistedDebt = JSON.parse(await readFile(debtPath, 'utf-8')) as { entries: Array<{ pane_id: string }> };
+      assert.deepEqual(persistedDebt.entries, [{ pane_id: '%405', authorized_pane_pid: process.pid, tracked_pids: [process.pid], evidence: 'process_identity_unavailable' }]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('shutdownTeam treats workers proven dead or absent as already gone', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-dead-pane-'));
     try {
@@ -7099,8 +7336,8 @@ esac
 
           const originalProcessKill = process.kill;
           let processKillCalls = 0;
-          process.kill = ((..._args: Parameters<typeof process.kill>) => {
-            processKillCalls += 1;
+          process.kill = ((...args: Parameters<typeof process.kill>) => {
+            if (args[1] !== 0) processKillCalls += 1;
             return true;
           }) as typeof process.kill;
           try {
@@ -7127,6 +7364,74 @@ esac
         },
       );
     } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('shutdownTeam preserves exact-pane state when final liveness proof becomes unknown', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-exact-final-unknown-'));
+    const originalProcessKill = process.kill;
+    const originalDateNow = Date.now;
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-exact-final-unknown-bin-',
+          tmuxScript: () => `#!/bin/sh
+set -eu
+case "$1" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"-a -F #{pane_id}"*)
+        printf "%%404\\t0\\t${process.pid}\\n"
+        exit 0
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+        },
+        async () => {
+          await initTeamState('team-exact-final-unknown', 'exact final unknown teardown test', 'executor', 1, cwd);
+          const config = await readTeamConfig('team-exact-final-unknown', cwd);
+          assert.ok(config);
+          if (!config) return;
+          config.tmux_session = 'omx-team-exact-final-unknown';
+          config.workers[0]!.pane_id = '%404';
+          await saveTeamConfig(config, cwd);
+
+          let clock = originalDateNow();
+          let livenessProbes = 0;
+          Date.now = () => (clock += 10_000);
+          process.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+            if (signal === 0 && pid === process.pid) {
+              livenessProbes += 1;
+              if (livenessProbes > 1) {
+                const error = new Error('permission denied') as NodeJS.ErrnoException;
+                error.code = 'EPERM';
+                throw error;
+              }
+            }
+            return true;
+          }) as typeof process.kill;
+
+          await assert.rejects(() => shutdownTeam('team-exact-final-unknown', cwd, { force: true }));
+          assert.ok(await readTeamConfig('team-exact-final-unknown', cwd));
+          assert.ok(livenessProbes > 1);
+        },
+      );
+    } finally {
+      process.kill = originalProcessKill;
+      Date.now = originalDateNow;
       await rm(cwd, { recursive: true, force: true });
     }
   });
@@ -7253,7 +7558,7 @@ case "$1" in
         exit 0
         ;;
       *"-t leader:0 -F #{pane_id}"*"#{pane_current_command}"*)
-        printf "%%11\\tzsh\\tzsh\\n%%12\\tnode\\tnode /tmp/bin/omx.js hud --watch\\n%%13\\tcodex\\texec /bin/sh '/tmp/.omx/state/team/team-shutdown-pane-reconcile/runtime/worker-1-startup.sh'\\n%%14\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-2 codex\\n%%15\\tcodex\\tcodex unrelated-not-worker\\n%%16\\tcodex\\tenv OMX_TEAM_WORKER=team-shutdown-pane-reconcile/worker-3 codex\\n%%17\\tcodex\\tworker-wrapper OMX_TEAM_INTERNAL_WORKER='team-shutdown-pane-reconcile/worker-4' codex\\n%%18\\tcodex\\tenv 'OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-5' codex\\n%%19\\tpowershell.exe\\tpowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${powershellWorkerCommand}\\n%%20\\tzsh\\techo 'OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-7'\\n%%21\\tzsh\\tprintf 'OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-8 codex'\\n%%22\\tzsh\\tenv OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-9 bash -lc 'echo codex'\\n"
+        printf "%%11\\tzsh\\tzsh\\n%%12\\tnode\\tnode /tmp/bin/omx.js hud --watch\\n%%13\\tcodex\\texec /bin/sh '/tmp/.omx/state/team/team-shutdown-pane-reconcile/runtime/worker-1-startup.sh'\\n%%14\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-2 codex\\n%%15\\tcodex\\tcodex unrelated-not-worker\\n%%16\\tcodex\\tenv OMX_TEAM_WORKER=team-shutdown-pane-reconcile/worker-3 codex\\n%%17\\tcodex\\tworker-wrapper OMX_TEAM_INTERNAL_WORKER='team-shutdown-pane-reconcile/worker-4' codex\\n%%18\\tcodex\\tenv 'OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-5' codex\\n%%19\\tpowershell.exe\\tpowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${powershellWorkerCommand}\\n%%999\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-2 codex\\n%%20\\tzsh\\techo 'OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-7'\\n%%21\\tzsh\\tprintf 'OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-8 codex'\\n%%22\\tzsh\\tenv OMX_TEAM_INTERNAL_WORKER=team-shutdown-pane-reconcile/worker-9 bash -lc 'echo codex'\\n"
         if [ -f "$restored_marker" ]; then
           printf "%%44\\tnode\\tnode /tmp/bin/omx.js hud --watch\\n"
         fi
@@ -7316,23 +7621,12 @@ esac
           config.workers[1]!.pane_id = '%999';
           await saveTeamConfig(config, cwd);
 
-          await shutdownTeam('team-shutdown-pane-reconcile', cwd, { force: true });
+          await assert.rejects(
+            () => shutdownTeam('team-shutdown-pane-reconcile', cwd, { force: true }),
+            /shutdown_pane_proof_unavailable:%999:pane_proof_lost_during_process_teardown/,
+          );
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %11/);
-          assert.match(tmuxLog, /kill-pane -t %12/);
-          assert.match(tmuxLog, /kill-pane -t %13/);
-          assert.match(tmuxLog, /kill-pane -t %14/);
-          assert.match(tmuxLog, /kill-pane -t %16/);
-          assert.match(tmuxLog, /kill-pane -t %17/);
-          assert.match(tmuxLog, /kill-pane -t %18/);
-          assert.match(tmuxLog, /kill-pane -t %19/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %999/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %15/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %20/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %21/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %22/);
-          assert.match(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %11 -d -P -F #\{pane_id\}`));
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %44/);
+          assert.doesNotMatch(tmuxLog, /set-hook -u|kill-pane|split-window|resize-pane|select-pane|run-shell/);
         },
       );
     } finally {
@@ -7622,7 +7916,7 @@ esac
     }
   });
 
-  it('shutdownTeam ignores stale persisted worker pane ids when a shared-session pane lacks worker evidence', async () => {
+  it('shutdownTeam fails closed before HUD effects when topology omits a canonical shared worker', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-stale-worker-pane-id-'));
     const teamName = 'team-stale-worker-pane-id';
     try {
@@ -7703,14 +7997,13 @@ esac
           config.workers[1]!.pane_id = '%15';
           await saveTeamConfig(config, cwd);
 
-          await shutdownTeam(teamName, cwd, { force: true });
+          await assert.rejects(
+            () => shutdownTeam(teamName, cwd, { force: true }),
+            /shutdown_shared_session_canonical_worker_omitted:%15/,
+          );
 
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %10/);
-          assert.match(tmuxLog, /kill-pane -t %12/);
-          assert.match(tmuxLog, /kill-pane -t %13/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %15/);
-          assert.match(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %10 -d -P -F #\\{pane_id\\}`));
+          assert.doesNotMatch(tmuxLog, /set-hook -u|kill-pane|split-window|resize-pane|select-pane|run-shell/);
         },
       );
     } finally {
@@ -7718,7 +8011,7 @@ esac
     }
   });
 
-  it('shutdownTeam preserves worker-looking panes with a mismatched team owner tag', async () => {
+  it('shutdownTeam fails closed when a canonical shared worker owner tag mismatches', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-worker-owner-mismatch-'));
     const teamName = 'team-worker-owner-mismatch';
     try {
@@ -7801,14 +8094,14 @@ esac
           config.workers[1]!.pane_id = '%14';
           await saveTeamConfig(config, cwd);
 
-          await shutdownTeam(teamName, cwd, { force: true });
+          await assert.rejects(
+            () => shutdownTeam(teamName, cwd, { force: true }),
+            /shutdown_shared_session_worker_owner_changed:%14/,
+          );
 
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %11/);
-          assert.match(tmuxLog, /kill-pane -t %12/);
-          assert.match(tmuxLog, /kill-pane -t %13/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %14/);
-          assert.match(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %11 -d -P -F #\\{pane_id\\}`));
+          assert.doesNotMatch(tmuxLog, /set-hook -u|kill-pane|split-window|resize-pane|select-pane|run-shell/);
+          assert.equal(existsSync(join(cwd, '.omx', 'state', 'team', teamName)), true);
         },
       );
     } finally {
@@ -7816,7 +8109,8 @@ esac
     }
   });
 
-  it('shutdownTeam preserves worker-looking panes when the team owner tag cannot be read', async () => {
+  it('shutdownTeam fails closed when a canonical shared worker owner tag cannot be read', async () => {
+
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-worker-owner-read-error-'));
     const teamName = 'team-worker-owner-read-error';
     try {
@@ -7899,12 +8193,13 @@ esac
           config.workers[1]!.pane_id = '%14';
           await saveTeamConfig(config, cwd);
 
-          await shutdownTeam(teamName, cwd, { force: true });
-
+          await assert.rejects(
+            () => shutdownTeam(teamName, cwd, { force: true }),
+            /shutdown_shared_session_worker_owner_unavailable:%14:tmux show-option exited 2/,
+          );
+          assert.equal(existsSync(join(cwd, '.omx', 'state', 'team', teamName)), true);
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-          assert.match(tmuxLog, /kill-pane -t %12/);
-          assert.match(tmuxLog, /kill-pane -t %13/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %14/);
+          assert.doesNotMatch(tmuxLog, /set-hook -u|kill-pane|split-window|resize-pane|select-pane|run-shell/);
         },
       );
     } finally {
@@ -8296,6 +8591,70 @@ esac
     }
   });
 
+  it('shutdownTeam fails closed when a tagged shared worker loses its owner tag before the HUD gate', async () => {
+
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-hud-prevalidation-'));
+    const teamName = 'team-hud-prevalidation';
+    try {
+      await withMockTmuxFixture({
+        dirPrefix: 'omx-runtime-shutdown-hud-prevalidation-bin-',
+        tmuxScript: (tmuxLogPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  -V) echo "tmux 3.4" ;;
+  list-panes)
+    case "$*" in
+      *"-a -F #{pane_id}"*)
+        if [ -f "${tmuxLogPath}.late-proof" ]; then
+          printf 'malformed snapshot\n'
+        else
+          : > "${tmuxLogPath}.late-proof"
+          printf '%%11\t0\t2000000011\n%%12\t0\t2000000012\n%%13\t0\t2000000013\n'
+        fi
+        ;;
+      *"-t leader:0 -F #{pane_id}"*) printf '%%11\\tzsh\\tzsh\\n%%12\\tnode\\tnode /omx.js hud --watch\\n%%13\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=team-hud-prevalidation/worker-1 codex\\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  show-option)
+    case "$*" in
+      *"-t %11 "*|*"-t %12 "*) echo 'team:team-hud-prevalidation' ;;
+      *"-t %13 "*)
+        if [ -f "${tmuxLogPath}.worker-owner-read" ]; then exit 1; fi
+        : > "${tmuxLogPath}.worker-owner-read"
+        echo 'team:team-hud-prevalidation'
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 0 ;;
+esac
+`,
+      }, async ({ tmuxLogPath }) => {
+        await initTeamState(teamName, 'shared HUD prevalidation test', 'executor', 1, cwd);
+        const config = await readTeamConfig(teamName, cwd);
+        assert.ok(config);
+        if (!config) return;
+        config.tmux_session = 'leader:0';
+        config.leader_pane_id = '%11';
+        config.hud_pane_id = '%12';
+        config.tmux_pane_owner_id = 'team:team-hud-prevalidation';
+        config.resize_hook_name = 'omx_resize_hud_prevalidation';
+        config.resize_hook_target = 'leader:0';
+        config.workers[0]!.pane_id = '%13';
+        await saveTeamConfig(config, cwd);
+
+        await assert.rejects(() => shutdownTeam(teamName, cwd, { force: true }), /shutdown_shared_session_worker_owner_changed:%13/);
+        assert.equal(existsSync(join(cwd, '.omx', 'state', 'team', teamName)), true);
+        const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+        assert.doesNotMatch(tmuxLog, /set-hook -u|kill-pane|split-window|resize-pane|select-pane/);
+      });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('shutdownTeam skips prekill and keeps the leader pane alive on shared-session shutdown', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-shared-session-'));
     try {
@@ -8605,13 +8964,13 @@ esac
           config.workers[1]!.pane_id = '%99';
           await saveTeamConfig(config, cwd);
 
-          await shutdownTeam(teamName, cwd, { force: true });
+          await assert.rejects(
+            () => shutdownTeam(teamName, cwd, { force: true }),
+            /shutdown_shared_session_canonical_worker_omitted:%99/,
+          );
 
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-          assert.match(tmuxLog, /kill-pane -t %12/);
-          assert.match(tmuxLog, /kill-pane -t %13/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %14/);
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %99/);
+          assert.doesNotMatch(tmuxLog, /set-hook -u|kill-pane|split-window|resize-pane|select-pane|run-shell/);
         },
       );
     } finally {

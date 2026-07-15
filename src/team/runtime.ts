@@ -1,6 +1,6 @@
 import { join, resolve, dirname } from 'path';
 import { existsSync, appendFileSync, mkdirSync } from 'fs';
-import { mkdir, readdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readdir, readFile, writeFile, rm } from 'fs/promises';
 import { performance } from 'perf_hooks';
 import { spawn, spawnSync, type ChildProcessByStdio } from 'child_process';
 import type { Writable } from 'stream';
@@ -37,7 +37,7 @@ import {
   listTeamSessions,
   resolveSharedSessionShutdownTopology,
 } from './tmux-session.js';
-import { readExactPaneProofSync, type ExactPaneProof } from './exact-pane.js';
+import { readExactPaneProofSync, readExactPaneProofsSync, type ExactPaneProof } from './exact-pane.js';
 import { reconcileScaleDownCleanupDebt } from './scaling.js';
 import {
   teamInit as initTeamState,
@@ -427,29 +427,49 @@ function collectShutdownPaneIds(params: {
   return [...paneIds];
 }
 
-function filterSharedSessionShutdownWorkerPaneIdsByOwner(
-  paneIds: string[],
+function collectAuthorizedSharedSessionWorkerPaneIds(
+  paneIds: readonly string[],
   teamPaneOwnerId: string,
-  legacyPersistedWorkerPaneIds: ReadonlySet<string> = new Set<string>(),
-  onOwnerReadError?: (paneId: string, error: string) => void,
+  canonicalWorkerPaneIds: ReadonlySet<string>,
+  initiallyTaggedWorkerPaneIds?: ReadonlySet<string>,
+  authorizedTaggedWorkerPaneIds?: Set<string>,
 ): string[] {
   const expectedOwnerId = teamPaneOwnerId.trim();
-  if (!expectedOwnerId) return [];
-  return paneIds.filter((paneId) => {
-    const actualOwnerId = readPaneTeamOwnerTagResult(paneId);
-    if (actualOwnerId.status === 'value') return actualOwnerId.value === expectedOwnerId;
-    if (actualOwnerId.status === 'missing') {
-      // Legacy, already-running Team panes may not have @omx_team_pane_owner_id.
-      // Keep that compatibility path explicitly bounded to panes that are both
-      // live worker-command candidates and persisted in this team's state. This
-      // preserves old Team cleanup without letting arbitrary worker-looking
-      // panes become kill candidates merely because the owner tag is absent.
-      return legacyPersistedWorkerPaneIds.has(paneId);
+  if (!expectedOwnerId && paneIds.length > 0) {
+    throw new Error('shutdown_shared_session_worker_owner_unavailable:missing_team_owner_id');
+  }
+
+  const authorized = new Set<string>();
+  for (const paneId of paneIds) {
+    const owner = readPaneTeamOwnerTagResult(paneId);
+    if (initiallyTaggedWorkerPaneIds?.has(paneId)
+      && (owner.status !== 'value' || owner.value !== expectedOwnerId)) {
+      throw new Error(`shutdown_shared_session_worker_owner_changed:${paneId}`);
     }
-    onOwnerReadError?.(paneId, actualOwnerId.error);
-    return false;
-  });
+    if (owner.status === 'error') {
+      // A read failure is authority ambiguity only for an explicit persisted
+      // worker that topology independently identifies as a worker candidate.
+      if (canonicalWorkerPaneIds.has(paneId)) {
+        throw new Error(`shutdown_shared_session_worker_owner_unavailable:${paneId}:${owner.error}`);
+      }
+      continue;
+    }
+    if (owner.status === 'value') {
+      if (owner.value === expectedOwnerId) {
+        authorized.add(paneId);
+        authorizedTaggedWorkerPaneIds?.add(paneId);
+      } else if (canonicalWorkerPaneIds.has(paneId)) {
+        throw new Error(`shutdown_shared_session_worker_owner_changed:${paneId}`);
+      }
+      continue;
+    }
+    // Legacy canonical workers may not have a team-owner tag. Do not use the
+    // same compatibility rule to acquire unpersisted discovered panes.
+    if (canonicalWorkerPaneIds.has(paneId)) authorized.add(paneId);
+  }
+  return [...authorized];
 }
+
 
 function isSharedSessionHudPaneReclaimable(params: {
   paneId: string;
@@ -2014,7 +2034,7 @@ function registerPromptWorkerHandle(
     const teamHandles = promptWorkerRegistry.get(teamName);
     if (!teamHandles) return;
     const handle = teamHandles.get(workerName);
-    if (handle?.processGroupId && isProcessGroupAlive(handle.processGroupId)) {
+    if (handle?.processGroupId && probeProcessGroupLiveness(handle.processGroupId) !== 'gone') {
       return;
     }
     teamHandles.delete(workerName);
@@ -2033,30 +2053,75 @@ function removePromptWorkerHandle(teamName: string, workerName: string): void {
   if (teamHandles.size === 0) promptWorkerRegistry.delete(teamName);
 }
 
-function isPidAlive(pid: number): boolean {
-  if (!Number.isFinite(pid) || pid <= 0) return false;
+function probePidLiveness(pid: number): 'alive' | 'gone' | 'unknown' {
+  if (!Number.isFinite(pid) || pid <= 0) return 'gone';
   try {
     process.kill(pid, 0);
-    return true;
+    return 'alive';
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return 'gone';
     process.stderr.write(`[team/runtime] operation failed: ${err}\n`);
-    return false;
+    return 'unknown';
   }
 }
 
-function isProcessGroupAlive(processGroupId: number): boolean {
-  if (process.platform === 'win32') return false;
-  if (!Number.isFinite(processGroupId) || processGroupId <= 0) return false;
+function isPidAlive(pid: number): boolean {
+  return probePidLiveness(pid) === 'alive';
+}
+
+function isPidGone(pid: number): boolean {
+  return probePidLiveness(pid) === 'gone';
+}
+
+type ProcessIdentity = {
+  pid: number;
+  /** Linux /proc stat start-time ticks; this changes when a PID is reused. */
+  start_time: string;
+};
+
+async function captureProcessIdentity(pid: number): Promise<ProcessIdentity | null> {
+  // There is no portable process birth identifier exposed by Node. Refuse to
+  // persist replayable PID debt on platforms without Linux's stable proc stat
+  // start-time field rather than later treating a reused PID as authoritative.
+  if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
-    process.kill(-processGroupId, 0);
-    return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false;
-    process.stderr.write(`[team/runtime] operation failed: ${err}\n`);
-    return false;
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.lastIndexOf(')');
+    const fields = close >= 0 ? stat.slice(close + 2).trim().split(/\s+/) : [];
+    // field 22 is starttime; fields begin at field 3 after the comm value.
+    const startTime = fields[19];
+    return typeof startTime === 'string' && /^[0-9]+$/.test(startTime)
+      ? { pid, start_time: startTime }
+      : null;
+  } catch {
+    return null;
   }
 }
+
+async function captureProcessIdentities(pids: readonly number[]): Promise<ProcessIdentity[] | null> {
+  const identities = await Promise.all([...new Set(pids)].map((pid) => captureProcessIdentity(pid)));
+  return identities.every((identity): identity is ProcessIdentity => identity !== null) ? identities : null;
+}
+
+async function probeProcessIdentity(identity: ProcessIdentity): Promise<'gone' | 'same' | 'reused_or_unknown'> {
+  const current = await captureProcessIdentity(identity.pid);
+  if (current === null) return probePidLiveness(identity.pid) === 'gone' ? 'gone' : 'reused_or_unknown';
+  return current.start_time === identity.start_time ? 'same' : 'reused_or_unknown';
+}
+
+function probeProcessGroupLiveness(processGroupId: number): 'alive' | 'gone' | 'unknown' {
+  if (process.platform === 'win32') return 'gone';
+  if (!Number.isFinite(processGroupId) || processGroupId <= 0) return 'gone';
+  try {
+    process.kill(-processGroupId, 0);
+    return 'alive';
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return 'gone';
+    process.stderr.write(`[team/runtime] operation failed: ${err}\n`);
+    return 'unknown';
+  }
+}
+
 
 interface PromptWorkerTeardownResult {
   terminated: boolean;
@@ -2126,11 +2191,11 @@ async function waitForTrackedPidsExit(pids: readonly number[], timeoutMs: number
 
   const deadline = Date.now() + Math.max(0, timeoutMs);
   while (Date.now() < deadline) {
-    if (tracked.every((pid) => !isPidAlive(pid))) return true;
+    if (tracked.every(isPidGone)) return true;
     await new Promise((resolve) => setTimeout(resolve, PROMPT_WORKER_EXIT_POLL_MS));
   }
 
-  return tracked.every((pid) => !isPidAlive(pid));
+  return tracked.every(isPidGone);
 }
 
 async function terminateTrackedProcessTree(
@@ -2161,9 +2226,9 @@ async function terminateTrackedProcessTree(
 
     const groupDeadline = Date.now() + Math.max(0, graceMs);
     while (Date.now() < groupDeadline) {
-      const groupAlive = isProcessGroupAlive(processGroupId);
-      const descendantsAlive = trackedPids.some((pid) => isPidAlive(pid));
-      if (!groupAlive && !descendantsAlive) {
+      const groupGone = probeProcessGroupLiveness(processGroupId) === 'gone';
+      const descendantsGone = trackedPids.every(isPidGone);
+      if (groupGone && descendantsGone) {
         return { terminated: true, forcedKill: false, trackedPids };
       }
       await new Promise((resolve) => setTimeout(resolve, PROMPT_WORKER_EXIT_POLL_MS));
@@ -2189,16 +2254,16 @@ async function terminateTrackedProcessTree(
 
     const killDeadline = Date.now() + Math.max(0, killWaitMs);
     while (Date.now() < killDeadline) {
-      const groupAlive = isProcessGroupAlive(processGroupId);
-      const descendantsAlive = trackedPids.some((pid) => isPidAlive(pid));
-      if (!groupAlive && !descendantsAlive) {
+      const groupGone = probeProcessGroupLiveness(processGroupId) === 'gone';
+      const descendantsGone = trackedPids.every(isPidGone);
+      if (groupGone && descendantsGone) {
         return { terminated: true, forcedKill: true, trackedPids };
       }
       await new Promise((resolve) => setTimeout(resolve, PROMPT_WORKER_EXIT_POLL_MS));
     }
 
     return {
-      terminated: !isProcessGroupAlive(processGroupId) && trackedPids.every((pid) => !isPidAlive(pid)),
+      terminated: probeProcessGroupLiveness(processGroupId) === 'gone' && trackedPids.every(isPidGone),
       forcedKill: true,
       trackedPids,
     };
@@ -2207,7 +2272,7 @@ async function terminateTrackedProcessTree(
   const trackedPids = collectProcessTreePids(rootPid);
   if (trackedPids.length === 0) {
     return {
-      terminated: !isPidAlive(rootPid),
+      terminated: isPidGone(rootPid),
       forcedKill: false,
       trackedPids: [],
     };
@@ -2250,11 +2315,14 @@ type ExactPaneUnavailableProof = Extract<ExactPaneProof, { status: 'unavailable'
 type ExactPaneProcessTreeTeardown = {
   terminated: boolean;
   stopped: boolean;
+  trackedPids: number[];
+  authorizedPanePid?: number;
   proofUnavailable?: ExactPaneUnavailableProof;
+  trackedProcessIdentities?: ProcessIdentity[];
 };
 
 type ExactPaneProcessProbe =
-  | { status: 'alive' | 'gone' | 'stopped' }
+  | { status: 'alive' | 'gone' | 'stopped' | 'unknown' }
   | { status: 'unavailable'; proof: ExactPaneUnavailableProof };
 
 /**
@@ -2293,15 +2361,19 @@ function probeExactPaneProcess(
     try {
       process.kill(pid, 0);
       return { status: 'stopped' };
-    } catch {
-      return { status: 'gone' };
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ESRCH'
+        ? { status: 'gone' }
+        : { status: 'unknown' };
     }
   }
   try {
     process.kill(pid, 0);
     return { status: 'alive' };
-  } catch {
-    return { status: 'gone' };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH'
+      ? { status: 'gone' }
+      : { status: 'unknown' };
   }
 }
 
@@ -2311,28 +2383,29 @@ async function waitForExactPaneTrackedPidsExit(
   pids: readonly number[],
   timeoutMs: number,
 ): Promise<ExactPaneProcessTreeTeardown> {
+  const trackedPids = [...pids];
   const deadline = Date.now() + Math.max(0, timeoutMs);
   do {
     let anyAlive = false;
-    for (const pid of pids) {
+    for (const pid of trackedPids) {
       const probe = probeExactPaneProcess(paneId, authorizedPanePid, pid);
-      if (probe.status === 'unavailable') return { terminated: false, stopped: true, proofUnavailable: probe.proof };
-      if (probe.status === 'stopped') return { terminated: false, stopped: true };
+      if (probe.status === 'unavailable') return { terminated: false, stopped: true, trackedPids, authorizedPanePid, proofUnavailable: probe.proof };
+      if (probe.status === 'stopped') return { terminated: false, stopped: true, trackedPids, authorizedPanePid };
+      if (probe.status === 'unknown') return { terminated: false, stopped: true, trackedPids, authorizedPanePid };
       if (probe.status === 'alive') anyAlive = true;
     }
-    if (!anyAlive) return { terminated: true, stopped: false };
+    if (!anyAlive) return { terminated: true, stopped: false, trackedPids, authorizedPanePid };
     if (Date.now() >= deadline) break;
     await new Promise((resolve) => setTimeout(resolve, PROMPT_WORKER_EXIT_POLL_MS));
   } while (Date.now() < deadline);
 
-  let anyAlive = false;
-  for (const pid of pids) {
+  for (const pid of trackedPids) {
     const probe = probeExactPaneProcess(paneId, authorizedPanePid, pid);
-    if (probe.status === 'unavailable') return { terminated: false, stopped: true, proofUnavailable: probe.proof };
-    if (probe.status === 'stopped') return { terminated: false, stopped: true };
-    if (probe.status === 'alive') anyAlive = true;
+    if (probe.status === 'unavailable') return { terminated: false, stopped: true, trackedPids, authorizedPanePid, proofUnavailable: probe.proof };
+    if (probe.status === 'stopped' || probe.status === 'unknown') return { terminated: false, stopped: true, trackedPids, authorizedPanePid };
+    if (probe.status === 'alive') return { terminated: false, stopped: false, trackedPids, authorizedPanePid };
   }
-  return { terminated: !anyAlive, stopped: false };
+  return { terminated: true, stopped: false, trackedPids, authorizedPanePid };
 }
 
 async function terminateExactPaneProcessTree(
@@ -2342,47 +2415,203 @@ async function terminateExactPaneProcessTree(
   killWaitMs: number = PROMPT_WORKER_SIGKILL_WAIT_MS,
 ): Promise<ExactPaneProcessTreeTeardown> {
   const authorization = readExactPaneProofSync(paneId);
-  if (authorization.status === 'unavailable') {
-    return { terminated: false, stopped: true, proofUnavailable: authorization };
-  }
-  if (authorization.status === 'gone') return { terminated: true, stopped: true };
+  if (authorization.status === 'unavailable') return { terminated: false, stopped: true, trackedPids: [], proofUnavailable: authorization };
+  if (authorization.status === 'gone') return { terminated: true, stopped: true, trackedPids: [] };
   if (typeof expectedPanePid === 'number' && authorization.pid !== expectedPanePid) {
-    return {
-      terminated: false,
-      stopped: true,
-      proofUnavailable: {
-        status: 'unavailable',
-        paneId,
-        reason: 'pane_pid_changed',
-        detail: `expected ${expectedPanePid}, got ${authorization.pid}`,
-      },
-    };
+    return { terminated: false, stopped: true, trackedPids: [], authorizedPanePid: authorization.pid, proofUnavailable: {
+      status: 'unavailable', paneId, reason: 'pane_pid_changed', detail: `expected ${expectedPanePid}, got ${authorization.pid}`,
+    } };
   }
 
   const trackedPids = collectProcessTreePids(authorization.pid);
-  if (trackedPids.length === 0) return { terminated: true, stopped: false };
-
+  if (trackedPids.length === 0) return { terminated: true, stopped: false, trackedPids, authorizedPanePid: authorization.pid };
+  // Birth evidence is only needed if pane authority is subsequently lost while
+  // descendants survive. Capture it opportunistically now, but do not make an
+  // ordinary successful teardown depend on /proc availability.
+  const trackedProcessIdentities = await captureProcessIdentities(trackedPids) ?? undefined;
   for (const pid of trackedPids) {
     const signal = signalExactPaneProcess(paneId, authorization.pid, pid, 'SIGTERM');
-    if (signal.status === 'unavailable') return { terminated: false, stopped: true, proofUnavailable: signal.proof };
-    if (signal.status === 'stopped') return { terminated: false, stopped: true };
+    if (signal.status === 'unavailable') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid, proofUnavailable: signal.proof };
+    if (signal.status === 'stopped') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
   }
-
   const graceful = await waitForExactPaneTrackedPidsExit(paneId, authorization.pid, trackedPids, graceMs);
-  if (graceful.terminated || graceful.stopped) return graceful;
-
+  if (graceful.terminated || graceful.stopped) return { ...graceful, trackedProcessIdentities };
   for (const pid of trackedPids) {
     const probe = probeExactPaneProcess(paneId, authorization.pid, pid);
-    if (probe.status === 'unavailable') return { terminated: false, stopped: true, proofUnavailable: probe.proof };
-    if (probe.status === 'stopped') return { terminated: false, stopped: true };
+    if (probe.status === 'unavailable') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid, proofUnavailable: probe.proof };
+    if (probe.status === 'stopped') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
     if (probe.status === 'gone') continue;
-
     const signal = signalExactPaneProcess(paneId, authorization.pid, pid, 'SIGKILL');
-    if (signal.status === 'unavailable') return { terminated: false, stopped: true, proofUnavailable: signal.proof };
-    if (signal.status === 'stopped') return { terminated: false, stopped: true };
+    if (signal.status === 'unavailable') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid, proofUnavailable: signal.proof };
+    if (signal.status === 'stopped') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
   }
+  return { ...(await waitForExactPaneTrackedPidsExit(paneId, authorization.pid, trackedPids, killWaitMs)), trackedProcessIdentities };
+}
 
-  return waitForExactPaneTrackedPidsExit(paneId, authorization.pid, trackedPids, killWaitMs);
+type GonePaneDescendantCleanupDebtEntry =
+  | {
+    pane_id: string;
+    authorized_pane_pid: number;
+    tracked_processes: ProcessIdentity[];
+    evidence: string;
+  }
+  | {
+    pane_id: string;
+    authorized_pane_pid: number;
+    tracked_pids: number[];
+    tracked_processes?: ProcessIdentity[];
+    evidence: 'process_identity_unavailable';
+  };
+
+type GonePaneDescendantCleanupDebt = {
+  schema_version: 1;
+  operation: 'gone_pane_descendant_cleanup';
+  entries: GonePaneDescendantCleanupDebtEntry[];
+};
+
+function gonePaneDescendantCleanupDebtPath(teamName: string, cwd: string, config?: TeamConfig): string {
+  const stateRoot = config?.team_state_root ?? resolveCanonicalTeamStateRoot(resolve(cwd));
+  return join(stateRoot, 'team', teamName, '.gone-pane-descendant-cleanup-debt.json');
+}
+
+function trackedPidsFromGonePaneDebtEntry(entry: GonePaneDescendantCleanupDebtEntry): number[] {
+  return 'tracked_pids' in entry
+    ? entry.tracked_pids
+    : entry.tracked_processes.map((identity) => identity.pid);
+}
+
+async function persistGonePaneDescendantCleanupDebt(params: {
+  teamName: string;
+  cwd: string;
+  config: TeamConfig;
+  paneId: string;
+  teardown: ExactPaneProcessTreeTeardown;
+}): Promise<void> {
+  const { teamName, cwd, config, paneId, teardown } = params;
+  const unresolvedTrackedPids = teardown.trackedPids.filter((pid) => probePidLiveness(pid) !== 'gone');
+  if (unresolvedTrackedPids.length === 0 || typeof teardown.authorizedPanePid !== 'number') return;
+  const liveTrackedProcesses = (teardown.trackedProcessIdentities ?? []).filter((identity) => (
+    unresolvedTrackedPids.includes(identity.pid)
+  ));
+  const debtPath = gonePaneDescendantCleanupDebtPath(teamName, cwd, config);
+  let prior: GonePaneDescendantCleanupDebt = { schema_version: 1, operation: 'gone_pane_descendant_cleanup', entries: [] };
+  try {
+    prior = JSON.parse(await readFile(debtPath, 'utf8')) as GonePaneDescendantCleanupDebt;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('gone_pane_descendant_cleanup_debt_unreadable');
+  }
+  if (!isValidGonePaneDescendantCleanupDebt(prior)) throw new Error('gone_pane_descendant_cleanup_debt_malformed');
+
+  const priorEntry = prior.entries.find((entry) => entry.pane_id === paneId);
+  const entries = prior.entries.filter((entry) => entry.pane_id !== paneId);
+  if (liveTrackedProcesses.length !== unresolvedTrackedPids.length) {
+    const priorIdentities = priorEntry?.tracked_processes ?? [];
+
+    const identitiesByPid = new Map(priorIdentities.map((identity) => [identity.pid, identity]));
+    for (const identity of liveTrackedProcesses) {
+      if (!identitiesByPid.has(identity.pid)) identitiesByPid.set(identity.pid, identity);
+    }
+    entries.push({
+      pane_id: paneId,
+      authorized_pane_pid: teardown.authorizedPanePid,
+      tracked_pids: [...new Set([...(priorEntry ? trackedPidsFromGonePaneDebtEntry(priorEntry) : []), ...unresolvedTrackedPids])],
+      ...(identitiesByPid.size > 0 ? { tracked_processes: [...identitiesByPid.values()] } : {}),
+      evidence: 'process_identity_unavailable',
+    });
+  } else {
+    entries.push({
+      pane_id: paneId,
+      authorized_pane_pid: teardown.authorizedPanePid,
+      tracked_processes: liveTrackedProcesses,
+      evidence: teardown.proofUnavailable
+        ? `${teardown.proofUnavailable.reason}:${teardown.proofUnavailable.detail ?? ''}`
+        : 'pane_authority_lost_during_descendant_teardown',
+    });
+  }
+  await writeAtomic(debtPath, JSON.stringify({ schema_version: 1, operation: 'gone_pane_descendant_cleanup', entries }, null, 2));
+}
+
+function isValidProcessIdentity(value: unknown): value is ProcessIdentity {
+  return typeof value === 'object' && value !== null
+    && Number.isSafeInteger((value as { pid?: unknown }).pid)
+    && (value as { pid: number }).pid > 0
+    && typeof (value as { start_time?: unknown }).start_time === 'string'
+    && /^[0-9]+$/.test((value as { start_time: string }).start_time);
+}
+
+function isValidGonePaneDescendantCleanupDebt(value: unknown): value is GonePaneDescendantCleanupDebt {
+  if (typeof value !== 'object' || value === null) return false;
+  const debt = value as Partial<GonePaneDescendantCleanupDebt>;
+  if (debt.schema_version !== 1 || debt.operation !== 'gone_pane_descendant_cleanup' || !Array.isArray(debt.entries)) return false;
+  if (new Set(debt.entries.map((entry) => (entry as { pane_id?: unknown })?.pane_id)).size !== debt.entries.length) return false;
+  return debt.entries.every((entry) => {
+    if (typeof entry !== 'object' || entry === null) return false;
+    const candidate = entry as {
+      pane_id?: unknown;
+      authorized_pane_pid?: unknown;
+      evidence?: unknown;
+      tracked_pids?: unknown;
+      tracked_processes?: unknown;
+    };
+    if (typeof candidate.pane_id !== 'string' || !/^%[0-9]+$/.test(candidate.pane_id)
+      || !Number.isSafeInteger(candidate.authorized_pane_pid)
+      || (candidate.authorized_pane_pid as number) <= 0) return false;
+    if (candidate.evidence === 'process_identity_unavailable') {
+      if (!Array.isArray(candidate.tracked_pids) || candidate.tracked_pids.length === 0
+        || candidate.tracked_pids.some((pid: unknown) => !Number.isSafeInteger(pid) || (pid as number) <= 0)
+        || new Set(candidate.tracked_pids).size !== candidate.tracked_pids.length) return false;
+      if (candidate.tracked_processes === undefined) return true;
+      if (!Array.isArray(candidate.tracked_processes) || !candidate.tracked_processes.every(isValidProcessIdentity)) return false;
+      const trackedPids = candidate.tracked_pids as number[];
+      const trackedProcesses = candidate.tracked_processes as ProcessIdentity[];
+      return trackedProcesses.every((identity) => trackedPids.includes(identity.pid))
+        && new Set(trackedProcesses.map((identity) => identity.pid)).size === trackedProcesses.length;
+    }
+    if (typeof candidate.evidence !== 'string' || candidate.evidence.length === 0
+      || candidate.tracked_pids !== undefined
+      || !Array.isArray(candidate.tracked_processes) || candidate.tracked_processes.length === 0
+      || !candidate.tracked_processes.every(isValidProcessIdentity)) return false;
+    const trackedProcesses = candidate.tracked_processes as ProcessIdentity[];
+    return new Set(trackedProcesses.map((identity) => identity.pid)).size === trackedProcesses.length;
+
+  });
+}
+
+async function reconcileGonePaneDescendantCleanupDebt(teamName: string, cwd: string, config?: TeamConfig): Promise<void> {
+  const debtPath = gonePaneDescendantCleanupDebtPath(teamName, cwd, config);
+  if (!existsSync(debtPath)) return;
+  let debt: GonePaneDescendantCleanupDebt;
+  try {
+    debt = JSON.parse(await readFile(debtPath, 'utf8')) as GonePaneDescendantCleanupDebt;
+  } catch {
+    throw new Error('gone_pane_descendant_cleanup_debt_unreadable');
+  }
+  if (!isValidGonePaneDescendantCleanupDebt(debt)) throw new Error('gone_pane_descendant_cleanup_debt_malformed');
+  const unresolved: GonePaneDescendantCleanupDebtEntry[] = [];
+  for (const entry of debt.entries) {
+    if ('tracked_pids' in entry) {
+      const trackedProcesses = entry.tracked_processes ?? [];
+      const knownIdentities = new Map<number, ProcessIdentity>(
+        trackedProcesses.map((identity) => [identity.pid, identity]),
+      );
+      const states: Array<'gone' | 'same' | 'reused_or_unknown'> = await Promise.all(entry.tracked_pids.map((pid: number) => {
+        const identity = knownIdentities.get(pid);
+        return identity ? probeProcessIdentity(identity) : Promise.resolve(
+          probePidLiveness(pid) === 'gone' ? 'gone' as const : 'reused_or_unknown' as const,
+        );
+      }));
+      if (states.some((state) => state !== 'gone')) unresolved.push(entry);
+      continue;
+    }
+    const states: Array<'gone' | 'same' | 'reused_or_unknown'> = await Promise.all(entry.tracked_processes.map(probeProcessIdentity));
+    if (states.some((state) => state !== 'gone')) unresolved.push(entry);
+  }
+  if (unresolved.length === 0) {
+    await rm(debtPath, { force: true });
+    return;
+  }
+  await writeAtomic(debtPath, JSON.stringify({ ...debt, entries: unresolved }, null, 2));
+  throw new Error(`gone_pane_descendant_cleanup_debt_unresolved:${unresolved.map((entry) => entry.pane_id).join(',')}`);
 }
 
 async function teardownPromptWorker(
@@ -2405,7 +2634,9 @@ async function teardownPromptWorker(
   }
 
   const teardown = await terminateTrackedProcessTree(pid ?? 0, processGroupId);
-  const processGone = processGroupId ? !isProcessGroupAlive(processGroupId) : !isPidAlive(pid!);
+  const processGone = processGroupId
+    ? probeProcessGroupLiveness(processGroupId) === 'gone'
+    : isPidGone(pid!);
   if (teardown.terminated && processGone) {
     removePromptWorkerHandle(teamName, workerName);
     return { terminated: true, forcedKill: teardown.forcedKill, pid };
@@ -2420,34 +2651,29 @@ async function teardownPromptWorker(
     },
     cwd,
   ).catch(() => {});
-  if (!teardown.terminated) {
-    await appendTeamEvent(
-      teamName,
-      {
-        type: 'worker_stopped',
-        worker: workerName,
-        reason: `prompt_teardown_failed:${context}:pid=${pid}`,
-      },
-      cwd,
-    ).catch(() => {});
-    return {
-      terminated: false,
-      forcedKill: teardown.forcedKill,
-      pid,
-      error: 'still_alive_after_sigkill',
-    };
-  }
-
-  removePromptWorkerHandle(teamName, workerName);
-  return { terminated: true, forcedKill: teardown.forcedKill, pid };
+  await appendTeamEvent(
+    teamName,
+    {
+      type: 'worker_stopped',
+      worker: workerName,
+      reason: `prompt_teardown_failed:${context}:pid=${pid}`,
+    },
+    cwd,
+  ).catch(() => {});
+  return {
+    terminated: false,
+    forcedKill: teardown.forcedKill,
+    pid,
+    error: 'still_alive_after_sigkill',
+  };
 }
 
 function isPromptWorkerAlive(config: TeamConfig, worker: WorkerInfo): boolean {
   const handle = getPromptWorkerHandle(config.name, worker.name);
   if (handle?.child.exitCode === null && !handle.child.killed) return true;
-  if (handle?.processGroupId && isProcessGroupAlive(handle.processGroupId)) return true;
-  if (process.platform !== 'win32' && isProcessGroupAlive(worker.pid as number)) return true;
-  return isPidAlive(worker.pid as number);
+  if (handle?.processGroupId && probeProcessGroupLiveness(handle.processGroupId) !== 'gone') return true;
+  if (process.platform !== 'win32' && probeProcessGroupLiveness(worker.pid as number) !== 'gone') return true;
+  return probePidLiveness(worker.pid as number) !== 'gone';
 }
 
 export { TEAM_LOW_COMPLEXITY_DEFAULT_MODEL };
@@ -2678,6 +2904,7 @@ export async function settleStartupAttemptResults(
   });
 }
 
+
 export async function startTeam(
   teamName: string,
   task: string,
@@ -2718,6 +2945,8 @@ export async function startTeam(
     : rawIdentityScope;
   const sanitized = buildInternalTeamName(displayName, identityScope);
   const leaderSessionId = identityScope.sessionId || identityScope.paneId || identityScope.tmuxTarget || identityScope.runId;
+  const existingStartupConfig = await readTeamConfig(sanitized, leaderCwd);
+  await reconcileGonePaneDescendantCleanupDebt(sanitized, leaderCwd, existingStartupConfig ?? undefined);
 
   await assertTeamStartupIsNonDestructive(sanitized, leaderCwd, leaderSessionId);
   if (displayName !== sanitized) {
@@ -3450,10 +3679,12 @@ export async function startTeam(
             config?.workers.find((worker) => worker.pane_id === paneId)?.pid,
           );
           if (teardown.proofUnavailable) {
+            if (config) await persistGonePaneDescendantCleanupDebt({ teamName: sanitized, cwd: leaderCwd, config, paneId, teardown });
             paneProcessProofUnavailable.push(teardown.proofUnavailable);
             break;
           }
           if (!teardown.terminated && teardown.stopped) {
+            if (config) await persistGonePaneDescendantCleanupDebt({ teamName: sanitized, cwd: leaderCwd, config, paneId, teardown });
             paneProcessProofUnavailable.push({
               status: 'unavailable',
               paneId,
@@ -3463,6 +3694,7 @@ export async function startTeam(
             break;
           }
         }
+
         if (paneProcessProofUnavailable.length > 0) {
           if (config) await saveTeamConfig(config, leaderCwd);
           assertPaneTeardownProofsAvailable('startup_rollback', paneProcessProofUnavailable);
@@ -3552,11 +3784,21 @@ export async function startTeam(
     }
     restoreTeamModelInstructionsFile(sanitized);
 
+    let descendantCleanupDebtUnresolved = false;
     try {
-      await cleanupTeamState(sanitized, leaderCwd);
+      await reconcileGonePaneDescendantCleanupDebt(sanitized, leaderCwd, config ?? undefined);
     } catch (cleanupError) {
-      rollbackErrors.push(`cleanupTeamState: ${String(cleanupError)}`);
+      descendantCleanupDebtUnresolved = true;
+      rollbackErrors.push(`reconcileGonePaneDescendantCleanupDebt: ${String(cleanupError)}`);
     }
+    if (!descendantCleanupDebtUnresolved) {
+      try {
+        await cleanupTeamState(sanitized, leaderCwd);
+      } catch (cleanupError) {
+        rollbackErrors.push(`cleanupTeamState: ${String(cleanupError)}`);
+      }
+    }
+
     if (provisionedWorktrees.length > 0) {
       try {
         await rollbackProvisionedWorktrees(provisionedWorktrees, {
@@ -4003,6 +4245,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
   const sanitized = resolveTeamNameForCurrentContext(teamName, cwd);
   const config = await readTeamConfig(sanitized, cwd);
   if (!config) {
+    await reconcileGonePaneDescendantCleanupDebt(sanitized, cwd);
     // No config -- just try to kill tmux session and clean up
     try {
       destroyTeamSession(`omx-team-${sanitized}`);
@@ -4016,6 +4259,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
   }
   const priorScaleDownCleanup = await reconcileScaleDownCleanupDebt(sanitized, cwd, config);
   if (!priorScaleDownCleanup.ok) throw new Error(priorScaleDownCleanup.error);
+  await reconcileGonePaneDescendantCleanupDebt(sanitized, cwd, config);
   const manifest = await readTeamManifestV2(sanitized, cwd);
   const leaderSessionId = typeof manifest?.leader?.session_id === 'string'
     ? manifest.leader.session_id.trim()
@@ -4168,11 +4412,6 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       : leaderPaneId;
 
     const tmuxPaneOwnerId = typeof config.tmux_pane_owner_id === 'string' ? config.tmux_pane_owner_id.trim() : '';
-    const legacyPersistedWorkerPaneIds = new Set(
-      config.workers
-        .map((worker) => (typeof worker.pane_id === 'string' ? worker.pane_id.trim() : ''))
-        .filter((paneId) => paneId.startsWith('%')),
-    );
     const ownerReadWarnings = new Set<string>();
     const warnOwnerReadError = (kind: string, paneId: string, error: string): void => {
       const key = `${kind}:${paneId}:${error}`;
@@ -4199,33 +4438,88 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       }))
       : (hudPaneId ? [hudPaneId] : []);
     const effectiveHudPaneId = reclaimableHudPaneIds[0] ?? null;
-    const shutdownCandidatePaneIds = sharedSessionTopology
-      ? filterSharedSessionShutdownWorkerPaneIdsByOwner(
+    const explicitPersistedWorkerPaneIds = new Set(config.workers
+      .map((worker) => (typeof worker.pane_id === 'string' ? worker.pane_id.trim() : ''))
+      .filter((paneId) => /^%[0-9]+$/.test(paneId))
+      .filter((paneId) => paneId !== leaderPaneId && paneId !== hudPaneId));
+    // Every persisted worker pane is a canonical shutdown member. Shared-session
+    // topology may add only panes positively authorized by this team owner.
+    const canonicalExplicitWorkerPaneIds = new Set(explicitPersistedWorkerPaneIds);
+    if (sharedSessionTopology) {
+      const omittedCanonicalWorkerPaneIds = [...canonicalExplicitWorkerPaneIds]
+        .filter((paneId) => !sharedSessionTopology.teamWorkerPaneIds.includes(paneId));
+      if (omittedCanonicalWorkerPaneIds.length > 0) {
+        throw new Error(`shutdown_shared_session_canonical_worker_omitted:${omittedCanonicalWorkerPaneIds.join(',')}`);
+      }
+    }
+    const initiallyTaggedWorkerPaneIds = new Set<string>();
+    const authorizedDiscoveredWorkerPaneIds = sharedSessionTopology
+      ? collectAuthorizedSharedSessionWorkerPaneIds(
         sharedSessionTopology.teamWorkerPaneIds,
         tmuxPaneOwnerId,
-        legacyPersistedWorkerPaneIds,
-        (paneId, error) => warnOwnerReadError('worker pane', paneId, error),
+        canonicalExplicitWorkerPaneIds,
+        undefined,
+        initiallyTaggedWorkerPaneIds,
       )
       : listPaneIds(sessionName);
-    let shutdownPaneIds = collectShutdownPaneIds({
-      config,
-      candidatePaneIds: shutdownCandidatePaneIds,
-      includePersistedWorkerPaneIds: !sharedSessionTopology,
-      leaderPaneId: effectiveLeaderPaneId,
-      hudPaneId: effectiveHudPaneId,
-    });
+    const excludedSharedWorkerPaneIds = new Set(
+      [effectiveLeaderPaneId, effectiveHudPaneId]
+        .filter((paneId): paneId is string => typeof paneId === 'string' && /^%[0-9]+$/.test(paneId)),
+    );
+    const sharedWorkerPaneIds = [...new Set(authorizedDiscoveredWorkerPaneIds)];
+    if (sharedSessionTopology && sharedWorkerPaneIds.some((paneId) => excludedSharedWorkerPaneIds.has(paneId))) {
+      throw new Error(`shutdown_shared_session_worker_target_invalid:${sharedWorkerPaneIds.filter((paneId) => excludedSharedWorkerPaneIds.has(paneId)).join(',')}`);
+    }
+    // Freeze this union before any shared-session topology effect. HUD teardown
+    // and restoration must never cause later worker target rediscovery.
+    const shutdownPaneIds = sharedSessionTopology
+      ? sharedWorkerPaneIds
+      : collectShutdownPaneIds({
+        config,
+        candidatePaneIds: authorizedDiscoveredWorkerPaneIds,
+        leaderPaneId: effectiveLeaderPaneId,
+        hudPaneId: effectiveHudPaneId,
+      });
+    const canonicalWorkerPaneIds = [...shutdownPaneIds];
+    const expectedSharedWorkerPanePids = new Map<string, number>();
+    const prekillResolvedWorkerPaneIds = new Set<string>();
+
+    const assertCompleteSharedWorkerPaneProofs = (allowResolvedGone = false): void => {
+
+      const unavailable = readExactPaneProofsSync(canonicalWorkerPaneIds).flatMap((proof) => {
+        if (proof.status !== 'live') {
+          if (allowResolvedGone && proof.status === 'gone' && prekillResolvedWorkerPaneIds.has(proof.paneId)) return [];
+          return proof.status === 'unavailable'
+            ? [proof]
+            : [{ status: 'unavailable' as const, paneId: proof.paneId, reason: 'pane_proof_lost_during_process_teardown' as const }];
+        }
+
+
+        const persistedPid = config.workers.find((worker) => worker.pane_id?.trim() === proof.paneId)?.pid;
+        const expectedPid = typeof persistedPid === 'number' ? persistedPid : expectedSharedWorkerPanePids.get(proof.paneId);
+        if (typeof expectedPid === 'number' && proof.pid !== expectedPid) {
+          return [{ status: 'unavailable' as const, paneId: proof.paneId, reason: 'pane_pid_changed' as const, detail: `expected ${expectedPid}, got ${proof.pid}` }];
+        }
+        expectedSharedWorkerPanePids.set(proof.paneId, proof.pid);
+        return [];
+      });
+      assertPaneTeardownProofsAvailable('shutdown', unavailable);
+    };
+    if (sharedSessionTopology) assertCompleteSharedWorkerPaneProofs();
     if (shouldPrekillInteractiveShutdownProcessTrees(sessionName)) {
       const paneProcessProofUnavailable: ExactPaneUnavailableProof[] = [];
       for (const paneId of shutdownPaneIds) {
         const teardown = await terminateExactPaneProcessTree(
           paneId,
-          config.workers.find((worker) => worker.pane_id === paneId)?.pid,
+          config.workers.find((worker) => worker.pane_id === paneId)?.pid ?? expectedSharedWorkerPanePids.get(paneId),
         );
         if (teardown.proofUnavailable) {
+          await persistGonePaneDescendantCleanupDebt({ teamName: sanitized, cwd, config, paneId, teardown });
           paneProcessProofUnavailable.push(teardown.proofUnavailable);
           break;
         }
         if (!teardown.terminated && teardown.stopped) {
+          await persistGonePaneDescendantCleanupDebt({ teamName: sanitized, cwd, config, paneId, teardown });
           paneProcessProofUnavailable.push({
             status: 'unavailable',
             paneId,
@@ -4234,11 +4528,35 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
           });
           break;
         }
+        if (teardown.terminated && readExactPaneProofSync(paneId).status === 'gone') {
+          prekillResolvedWorkerPaneIds.add(paneId);
+        }
+
+
       }
       if (paneProcessProofUnavailable.length > 0) {
         await saveTeamConfig(config, cwd);
         assertPaneTeardownProofsAvailable('shutdown', paneProcessProofUnavailable);
       }
+    }
+
+    // Revalidate ownership of the frozen discovered members, then re-prove the
+    // frozen complete worker set in one snapshot immediately before the first
+    // HUD topology effect. This never admits a newly discovered pane.
+    if (sharedSessionTopology) {
+      const reauthorizedDiscoveredWorkerPaneIds = collectAuthorizedSharedSessionWorkerPaneIds(
+        authorizedDiscoveredWorkerPaneIds,
+        tmuxPaneOwnerId,
+        canonicalExplicitWorkerPaneIds,
+        initiallyTaggedWorkerPaneIds,
+      );
+
+      if (reauthorizedDiscoveredWorkerPaneIds.length !== authorizedDiscoveredWorkerPaneIds.length
+        || reauthorizedDiscoveredWorkerPaneIds.some((paneId) => !authorizedDiscoveredWorkerPaneIds.includes(paneId))) {
+        throw new Error('shutdown_shared_session_worker_owner_changed');
+      }
+      assertCompleteSharedWorkerPaneProofs(true);
+
     }
 
     let resizeHookWarning: string | null = null;
@@ -4282,27 +4600,17 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         await saveTeamConfig(config, cwd);
       }
     }
-    shutdownPaneIds = collectShutdownPaneIds({
-      config,
-      candidatePaneIds: sharedSessionTopology
-        ? filterSharedSessionShutdownWorkerPaneIdsByOwner(
-          sharedSessionTopology.teamWorkerPaneIds,
-          tmuxPaneOwnerId,
-          legacyPersistedWorkerPaneIds,
-          (paneId, error) => warnOwnerReadError('worker pane', paneId, error),
-        )
-        : listPaneIds(sessionName),
-      includePersistedWorkerPaneIds: !sharedSessionTopology,
-      restoredStandaloneHudPaneId: restoredHudPaneId,
-      leaderPaneId: effectiveLeaderPaneId,
-      hudPaneId: effectiveHudPaneId,
-    });
-    const workerTeardown = await teardownWorkerPanes(shutdownPaneIds, {
-      leaderPaneId: effectiveLeaderPaneId,
-      hudPaneId: restoredHudPaneId ?? effectiveHudPaneId,
-      expectedPanePids: Object.fromEntries(config.workers
-        .filter((worker) => typeof worker.pane_id === 'string' && typeof worker.pid === 'number')
-        .map((worker) => [worker.pane_id as string, worker.pid as number])),
+    const workerTeardown = await teardownWorkerPanes(
+      shutdownPaneIds.filter((paneId) => !prekillResolvedWorkerPaneIds.has(paneId)),
+      {
+        leaderPaneId: effectiveLeaderPaneId,
+        hudPaneId: restoredHudPaneId ?? effectiveHudPaneId,
+      expectedPanePids: {
+        ...Object.fromEntries(expectedSharedWorkerPanePids),
+        ...Object.fromEntries(config.workers
+          .filter((worker) => typeof worker.pane_id === 'string' && typeof worker.pid === 'number')
+          .map((worker) => [worker.pane_id as string, worker.pid as number])),
+      },
     });
     assertPaneTeardownProofsAvailable('shutdown', workerTeardown.proofUnavailable);
     if (workerTeardown.kill.failed > 0) {
@@ -4482,7 +4790,7 @@ export async function resumeTeam(teamName: string, cwd: string): Promise<TeamRun
     const missingHandles = config.workers
       .filter((worker) => {
         if (!Number.isFinite(worker.pid) || (worker.pid ?? 0) <= 0) return false;
-        return isPidAlive(worker.pid as number);
+        return probePidLiveness(worker.pid as number) !== 'gone';
       })
       .filter((worker) => !getPromptWorkerHandle(sanitized, worker.name));
     if (missingHandles.length > 0) {
@@ -4742,7 +5050,7 @@ async function notifyWorkerOutcome(config: TeamConfig, workerIndex: number, mess
     return { ok: false, transport: 'tmux_send_keys', reason: 'tmux_unavailable' };
   }
   try {
-    await sendToWorker(config.tmux_session, workerIndex, message, workerPaneId, worker.worker_cli);
+    await sendToWorker(config.tmux_session, workerIndex, message, workerPaneId, worker.worker_cli, worker.pid ?? undefined);
     return { ok: true, transport: 'tmux_send_keys', reason: 'tmux_send_keys_sent' };
   } catch (error) {
     return {

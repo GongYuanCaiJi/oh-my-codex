@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, readFile, writeFile, mkdir, chmod, readdir } from 'fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir, chmod, readdir, symlink } from 'fs/promises';
 import { join, relative } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, readFileSync } from 'fs';
@@ -3090,6 +3090,7 @@ esac
       const tmuxCommands = await readScaleUpTmuxLogCommands(tmuxLogPath);
       assert.deepEqual(tmuxCommands, [
         'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
+        'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
       ]);
     } finally {
       if (typeof previousPath === 'string') process.env.PATH = previousPath;
@@ -3500,6 +3501,7 @@ exit 0
         status: 'pending_teardown',
         removed_worker_names: ['worker-2'],
         workers: [{ name: 'worker-2', index: 2, pane_id: '%13', pid: 42413 }],
+        resource_workers: [{ name: 'worker-2' }],
       }));
 
       const recovered = await reconcileScaleDownCleanupDebt('precommit-debt', cwd, config);
@@ -3535,6 +3537,7 @@ case "\${1:-}" in
       printf '%s\t%s\t%s\n' '%14' '0' '42414'
     fi
     ;;
+  show-option) printf '%s\n' 'team:success-proof-loss' ;;
   kill-pane)
     if [ -f "${proofLossMarkerPath}.recovery" ]; then
       if [ "$3" = '%13' ]; then : > "${proofLossMarkerPath}.killed-13"; fi
@@ -3554,8 +3557,18 @@ exit 0
       assert.ok(config);
       if (!config) return;
       config.workers[1]!.pane_id = '%13';
+      config.workers[1]!.pid = 42413;
       config.workers[2]!.pane_id = '%14';
+      config.workers[2]!.pid = 42414;
       await saveTeamConfig(config, cwd);
+      await writeFile(
+        join(cwd, '.omx', 'state', 'team', 'success-proof-loss', 'workers', 'worker-2', 'identity.json'),
+        JSON.stringify({ name: 'worker-2', index: 2, pane_id: '%13', pid: 42413 }),
+      );
+      await writeFile(
+        join(cwd, '.omx', 'state', 'team', 'success-proof-loss', 'workers', 'worker-3', 'identity.json'),
+        JSON.stringify({ name: 'worker-3', index: 3, pane_id: '%14', pid: 42414 }),
+      );
       const resolvedTask = await createTask('success-proof-loss', {
         subject: 'resolved owner task', description: 'must be reclaimed', status: 'pending', owner: 'worker-2',
       }, cwd);
@@ -3750,4 +3763,408 @@ esac
       }
     });
   }
+  it('uses canonical membership rather than a stale caller config before consuming precommit debt', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-down-canonical-debt-'));
+    try {
+      await initTeamState('canonical-debt', 'task', 'executor', 2, cwd);
+      const canonical = await readTeamConfig('canonical-debt', cwd);
+      assert.ok(canonical);
+      if (!canonical) return;
+      const staleCaller = structuredClone(canonical);
+      staleCaller.workers = staleCaller.workers.filter((worker) => worker.name !== 'worker-2');
+      staleCaller.worker_count = staleCaller.workers.length;
+      const workerDir = join(cwd, '.omx', 'state', 'team', 'canonical-debt', 'workers', 'worker-2');
+      const sentinelPath = join(workerDir, 'caller-must-not-authorize');
+      await writeFile(sentinelPath, 'preserve');
+      const debtPath = join(cwd, '.omx', 'state', 'team', 'canonical-debt', '.scale-down-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'scale_down',
+        status: 'pending_teardown',
+        removed_worker_names: ['worker-2'],
+        workers: [{ name: 'worker-2', index: 2, pane_id: '%13', pid: 42413 }],
+        resource_workers: [{ name: 'worker-2' }],
+      }));
+
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('canonical-debt', cwd, staleCaller), { ok: true });
+      assert.equal(existsSync(debtPath), false);
+      assert.equal(await readFile(sentinelPath, 'utf8'), 'preserve');
+      assert.equal((await readTeamConfig('canonical-debt', cwd))?.workers.some((worker) => worker.name === 'worker-2'), true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('converges pane-less crash debt through worker status and directory cleanup', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-down-zero-pane-debt-'));
+    try {
+      await initTeamState('zero-pane-debt', 'task', 'executor', 2, cwd);
+      const config = await readTeamConfig('zero-pane-debt', cwd);
+      assert.ok(config);
+      if (!config) return;
+      config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
+      config.worker_count = config.workers.length;
+      await saveTeamConfig(config, cwd);
+      const workerDir = join(cwd, '.omx', 'state', 'team', 'zero-pane-debt', 'workers', 'worker-2');
+      await mkdir(workerDir, { recursive: true });
+      await writeFile(join(workerDir, 'status.json'), '{"state":"draining"}');
+      const debtPath = join(cwd, '.omx', 'state', 'team', 'zero-pane-debt', '.scale-down-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'scale_down',
+        status: 'resource_cleanup_pending',
+        removed_worker_names: ['worker-2'],
+        workers: [],
+        resource_workers: [{ name: 'worker-2' }],
+      }));
+
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('zero-pane-debt', cwd, config), { ok: true });
+      assert.equal(existsSync(workerDir), false);
+      assert.equal(existsSync(debtPath), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('converges resource debt after a crash following successful worktree cleanup', async () => {
+    const repo = await initRepo();
+    try {
+      await initTeamState('resource-retry', 'task', 'executor', 2, repo);
+      const config = await readTeamConfig('resource-retry', repo);
+      assert.ok(config);
+      if (!config) return;
+      config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
+      config.worker_count = config.workers.length;
+      await saveTeamConfig(config, repo);
+      const worktreePath = join(repo, '.omx', 'team', 'resource-retry', 'worktrees', 'worker-2');
+      const workerDir = join(repo, '.omx', 'state', 'team', 'resource-retry', 'workers', 'worker-2');
+      await mkdir(workerDir, { recursive: true });
+      execFileSync('git', ['worktree', 'add', '--detach', worktreePath], { cwd: repo, stdio: 'ignore' });
+      const debtPath = join(repo, '.omx', 'state', 'team', 'resource-retry', '.scale-down-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'scale_down',
+        status: 'resource_cleanup_pending',
+        removed_worker_names: ['worker-2'],
+        workers: [],
+        resource_workers: [{
+          name: 'worker-2', worktree_path: worktreePath, worktree_repo_root: repo,
+          worktree_detached: true, worktree_created: true,
+        }],
+      }));
+
+      // Simulate a crash after git worktree removal but before worker-state
+      // cleanup and debt deletion. The retry must treat the exact absent target
+      // as converged rather than attempting to remove a replacement.
+      execFileSync('git', ['worktree', 'remove', '--force', worktreePath], { cwd: repo, stdio: 'ignore' });
+      assert.equal(existsSync(worktreePath), false);
+      assert.equal(existsSync(workerDir), true);
+
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('resource-retry', repo, config), { ok: true });
+      assert.equal(existsSync(worktreePath), false);
+      assert.equal(existsSync(workerDir), false);
+      assert.equal(existsSync(debtPath), false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed worktree debt without mutating worker resources', async () => {
+    const repo = await initRepo();
+    try {
+      await initTeamState('malformed-resource-debt', 'task', 'executor', 2, repo);
+      const config = await readTeamConfig('malformed-resource-debt', repo);
+      assert.ok(config);
+      if (!config) return;
+      config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
+      config.worker_count = config.workers.length;
+      await saveTeamConfig(config, repo);
+      const workerDir = join(repo, '.omx', 'state', 'team', 'malformed-resource-debt', 'workers', 'worker-2');
+      const sentinelPath = join(workerDir, 'sentinel');
+      await mkdir(workerDir, { recursive: true });
+      await writeFile(sentinelPath, 'preserve');
+      const debtPath = join(repo, '.omx', 'state', 'team', 'malformed-resource-debt', '.scale-down-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'scale_down',
+        status: 'resource_cleanup_pending',
+        removed_worker_names: ['worker-2'],
+        workers: [],
+        resource_workers: [{
+          name: 'worker-2',
+          worktree_path: join(repo, '.omx', 'team', 'malformed-resource-debt', 'worktrees', '..', 'worker-2'),
+          worktree_repo_root: repo,
+          worktree_detached: true,
+          worktree_created: true,
+        }],
+      }));
+
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('malformed-resource-debt', repo, config), {
+        ok: false,
+        error: 'scale_down_cleanup_debt_malformed',
+      });
+      assert.equal(await readFile(sentinelPath, 'utf8'), 'preserve');
+      assert.equal(existsSync(debtPath), true);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects foreign worktree debt without mutating the foreign location', async () => {
+    const repo = await initRepo();
+    const foreign = await mkdtemp(join(tmpdir(), 'omx-scale-down-foreign-'));
+    try {
+      await initTeamState('foreign-resource-debt', 'task', 'executor', 2, repo);
+      const config = await readTeamConfig('foreign-resource-debt', repo);
+      assert.ok(config);
+      if (!config) return;
+      config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
+      config.worker_count = config.workers.length;
+      await saveTeamConfig(config, repo);
+      const sentinelPath = join(foreign, 'AGENTS.md');
+      await writeFile(sentinelPath, 'foreign');
+      const debtPath = join(repo, '.omx', 'state', 'team', 'foreign-resource-debt', '.scale-down-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'scale_down',
+        status: 'resource_cleanup_pending',
+        removed_worker_names: ['worker-2'],
+        workers: [],
+        resource_workers: [{
+          name: 'worker-2', worktree_path: foreign, worktree_repo_root: repo,
+          worktree_detached: true, worktree_created: true,
+        }],
+      }));
+
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('foreign-resource-debt', repo, config), {
+        ok: false,
+        error: 'scale_down_cleanup_debt_malformed',
+      });
+      assert.equal(await readFile(sentinelPath, 'utf8'), 'foreign');
+      assert.equal(existsSync(debtPath), true);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(foreign, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects symlink-parent worktree debt without mutating the linked location', async () => {
+    const repo = await initRepo();
+    const foreign = await mkdtemp(join(tmpdir(), 'omx-scale-down-symlink-'));
+    try {
+      await initTeamState('symlink-resource-debt', 'task', 'executor', 2, repo);
+      const config = await readTeamConfig('symlink-resource-debt', repo);
+      assert.ok(config);
+      if (!config) return;
+      config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
+      config.worker_count = config.workers.length;
+      await saveTeamConfig(config, repo);
+      const expectedWorktreeRoot = join(repo, '.omx', 'team', 'symlink-resource-debt', 'worktrees');
+      await mkdir(join(repo, '.omx', 'team', 'symlink-resource-debt'), { recursive: true });
+      await symlink(foreign, expectedWorktreeRoot);
+      const sentinelPath = join(foreign, 'AGENTS.md');
+      await writeFile(sentinelPath, 'foreign');
+      const debtPath = join(repo, '.omx', 'state', 'team', 'symlink-resource-debt', '.scale-down-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'scale_down',
+        status: 'resource_cleanup_pending',
+        removed_worker_names: ['worker-2'],
+        workers: [],
+        resource_workers: [{
+          name: 'worker-2', worktree_path: join(expectedWorktreeRoot, 'worker-2'), worktree_repo_root: repo,
+          worktree_detached: true, worktree_created: true,
+        }],
+      }));
+
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('symlink-resource-debt', repo, config), {
+        ok: false,
+        error: 'scale_down_cleanup_debt_malformed',
+      });
+      assert.equal(await readFile(sentinelPath, 'utf8'), 'foreign');
+      assert.equal(existsSync(debtPath), true);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(foreign, { recursive: true, force: true });
+    }
+  });
+  it('rejects cleanup debt that collides with a surviving canonical worker before any tmux effect', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-down-debt-survivor-collision-'));
+    const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-down-debt-survivor-collision-bin-'));
+    const tmuxStubPath = join(fakeBinDir, 'tmux');
+    const tmuxLogPath = join(fakeBinDir, 'tmux.log');
+    const previousPath = process.env.PATH;
+    try {
+      await writeFile(tmuxStubPath, `#!/bin/sh
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+exit 99
+`);
+      await chmod(tmuxStubPath, 0o755);
+      process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
+      await initTeamState('debt-survivor-collision', 'task', 'executor', 3, cwd);
+      const config = await readTeamConfig('debt-survivor-collision', cwd);
+      assert.ok(config);
+      if (!config) return;
+      config.workers[0]!.pane_id = '%13';
+      config.workers[0]!.pid = 42413;
+      config.workers = config.workers.filter((worker) => worker.name !== 'worker-2' && worker.name !== 'worker-3');
+      config.worker_count = config.workers.length;
+      await saveTeamConfig(config, cwd);
+      const debtPath = join(cwd, '.omx', 'state', 'team', 'debt-survivor-collision', '.scale-down-cleanup-debt.json');
+      const debt = {
+        schema_version: 1,
+        operation: 'scale_down',
+        status: 'pending_teardown',
+        removed_worker_names: ['worker-2', 'worker-3'],
+        workers: [
+          { name: 'worker-2', index: 2, pane_id: '%13', pid: 42414 },
+          { name: 'worker-3', index: 3, pane_id: '%14', pid: 42413 },
+        ],
+        resource_workers: [{ name: 'worker-2' }, { name: 'worker-3' }],
+      };
+      await writeFile(debtPath, JSON.stringify(debt));
+
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('debt-survivor-collision', cwd, config), {
+        ok: false,
+        error: 'scale_down_cleanup_debt_malformed',
+      });
+      assert.deepEqual(JSON.parse(await readFile(debtPath, 'utf8')), debt);
+      assert.equal(existsSync(tmuxLogPath), false);
+    } finally {
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      await rm(cwd, { recursive: true, force: true });
+      await rm(fakeBinDir, { recursive: true, force: true });
+    }
+  });
+
+  for (const [name, livePid, ownerMode, expectedReason] of [
+    ['refuses an unrelated current pane occupant', 42413, 'foreign', 'team_owner_mismatch'],
+    ['refuses a PID-reused pane even with the Team owner tag', 52413, 'team', 'pane_pid_changed'],
+    ['fails closed when Team owner authorization is unavailable', 42413, 'unavailable', 'team_owner_unavailable'],
+  ] as const) {
+    it(name, async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-down-debt-pane-authority-'));
+      const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-down-debt-pane-authority-bin-'));
+      const tmuxStubPath = join(fakeBinDir, 'tmux');
+      const tmuxLogPath = join(fakeBinDir, 'tmux.log');
+      const previousPath = process.env.PATH;
+      try {
+        const ownerScript = ownerMode === 'unavailable'
+          ? 'echo owner-query-failed >&2; exit 2'
+          : `printf '%s\\n' '${ownerMode === 'team' ? 'team:debt-pane-authority' : 'team:another-team'}'`;
+        await writeFile(tmuxStubPath, `#!/bin/sh
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  list-panes) printf '%s\\t%s\\t%s\\n' '%13' '0' '${livePid}' ;;
+  show-option) ${ownerScript} ;;
+  kill-pane) echo unexpected-kill >&2; exit 99 ;;
+esac
+`);
+        await chmod(tmuxStubPath, 0o755);
+        process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
+        await initTeamState('debt-pane-authority', 'task', 'executor', 2, cwd);
+        const config = await readTeamConfig('debt-pane-authority', cwd);
+        assert.ok(config);
+        if (!config) return;
+        config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
+        config.worker_count = config.workers.length;
+        await saveTeamConfig(config, cwd);
+        await writeFile(
+          join(cwd, '.omx', 'state', 'team', 'debt-pane-authority', 'workers', 'worker-2', 'identity.json'),
+          JSON.stringify({ name: 'worker-2', index: 2, pane_id: '%13', pid: 42413 }),
+        );
+        const debtPath = join(cwd, '.omx', 'state', 'team', 'debt-pane-authority', '.scale-down-cleanup-debt.json');
+        await writeFile(debtPath, JSON.stringify({
+          schema_version: 1, operation: 'scale_down', status: 'pending_teardown',
+          removed_worker_names: ['worker-2'],
+          workers: [{ name: 'worker-2', index: 2, pane_id: '%13', pid: 42413 }],
+          resource_workers: [{ name: 'worker-2' }],
+        }));
+
+        assert.deepEqual(await reconcileScaleDownCleanupDebt('debt-pane-authority', cwd, config), {
+          ok: false, error: 'scale_down_cleanup_debt_unresolved:%13',
+        });
+        const debt = JSON.parse(await readFile(debtPath, 'utf8')) as { reasons: string[] };
+        assert.ok(debt.reasons.includes(`%13:${expectedReason}`));
+        const commands = existsSync(tmuxLogPath) ? await readFile(tmuxLogPath, 'utf8') : '';
+        assert.doesNotMatch(commands, /kill-pane/);
+      } finally {
+        if (typeof previousPath === 'string') process.env.PATH = previousPath;
+        else delete process.env.PATH;
+        await rm(cwd, { recursive: true, force: true });
+        await rm(fakeBinDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it('rejects mismatched worker pane bindings before any recovery mutation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-down-debt-mismatched-binding-'));
+    try {
+      await initTeamState('debt-mismatched-binding', 'task', 'executor', 2, cwd);
+      const config = await readTeamConfig('debt-mismatched-binding', cwd);
+      assert.ok(config);
+      if (!config) return;
+      config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
+      config.worker_count = config.workers.length;
+      await saveTeamConfig(config, cwd);
+      const workerDir = join(cwd, '.omx', 'state', 'team', 'debt-mismatched-binding', 'workers', 'worker-2');
+      const sentinel = join(workerDir, 'must-remain');
+      await writeFile(sentinel, 'preserve');
+      const debtPath = join(cwd, '.omx', 'state', 'team', 'debt-mismatched-binding', '.scale-down-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1, operation: 'scale_down', status: 'unresolved',
+        removed_worker_names: ['worker-2'],
+        workers: [{ name: 'worker-2', index: 2, pane_id: '%13', pid: 42413 }],
+        unresolved_panes: [{ name: 'worker-2', index: 2, pane_id: '%14', pid: 42413 }],
+        resource_workers: [{ name: 'worker-2' }],
+      }));
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('debt-mismatched-binding', cwd, config), {
+        ok: false, error: 'scale_down_cleanup_debt_malformed',
+      });
+      assert.equal(await readFile(sentinel, 'utf8'), 'preserve');
+      assert.equal(existsSync(debtPath), true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('converges a PID-less legacy pane record only after a fresh global gone proof', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-down-debt-legacy-gone-'));
+    const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-down-debt-legacy-gone-bin-'));
+    const tmuxStubPath = join(fakeBinDir, 'tmux');
+    const tmuxLogPath = join(fakeBinDir, 'tmux.log');
+    const previousPath = process.env.PATH;
+    try {
+      await writeFile(tmuxStubPath, `#!/bin/sh
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in list-panes) exit 0 ;; kill-pane) exit 99 ;; esac
+`);
+      await chmod(tmuxStubPath, 0o755);
+      process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
+      await initTeamState('debt-legacy-gone', 'task', 'executor', 2, cwd);
+      const config = await readTeamConfig('debt-legacy-gone', cwd);
+      assert.ok(config);
+      if (!config) return;
+      config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
+      config.worker_count = config.workers.length;
+      await saveTeamConfig(config, cwd);
+      const debtPath = join(cwd, '.omx', 'state', 'team', 'debt-legacy-gone', '.scale-down-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1, operation: 'scale_down', status: 'unresolved',
+        removed_worker_names: ['worker-2'],
+        workers: [{ name: 'worker-2', index: 2, pane_id: '%13', pid: null }],
+        unresolved_panes: [{ name: 'worker-2', index: 2, pane_id: '%13', pid: null }],
+        resource_workers: [{ name: 'worker-2' }],
+      }));
+      assert.deepEqual(await reconcileScaleDownCleanupDebt('debt-legacy-gone', cwd, config), { ok: true });
+      assert.equal(existsSync(debtPath), false);
+      assert.doesNotMatch(await readFile(tmuxLogPath, 'utf8'), /kill-pane|show-option/);
+    } finally {
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      await rm(cwd, { recursive: true, force: true });
+      await rm(fakeBinDir, { recursive: true, force: true });
+    }
+  });
 });

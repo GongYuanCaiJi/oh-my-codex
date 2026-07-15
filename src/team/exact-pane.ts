@@ -6,7 +6,7 @@ export type ExactPaneProof =
   | {
     status: 'unavailable';
     paneId: string;
-    reason: 'invalid_pane_id' | 'query_failed' | 'malformed_snapshot' | 'pane_pid_changed' | 'pane_proof_lost_during_process_teardown';
+    reason: 'invalid_pane_id' | 'query_failed' | 'malformed_snapshot' | 'pane_pid_changed' | 'pane_proof_lost_during_process_teardown' | 'process_identity_unavailable';
     detail?: string;
   };
 
@@ -85,6 +85,33 @@ export function readExactPaneProofSync(paneId: string): ExactPaneProof {
   }
 
   return parseExactPaneProof(paneId, typeof result.stdout === 'string' ? result.stdout : '');
+}
+
+/**
+ * Read one global tmux pane snapshot and prove every requested exact pane from
+ * that same observation. Callers use this before topology-changing batches so
+ * one later target cannot invalidate an earlier authorization.
+ */
+export function readExactPaneProofsSync(paneIds: readonly string[]): ExactPaneProof[] {
+  if (paneIds.length === 0) return [];
+  const invalidProofs = paneIds.map((paneId) => (
+    EXACT_PANE_ID_PATTERN.test(paneId) ? null : unavailable(paneId, 'invalid_pane_id')
+  ));
+  if (invalidProofs.some((proof) => proof !== null)) {
+    return invalidProofs.map((proof, index) => proof ?? unavailable(paneIds[index]!, 'query_failed'));
+  }
+
+  const { result } = spawnPlatformCommandSync('tmux', LIST_PANES_ARGS, {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message
+      ?? ((typeof result.stderr === 'string' ? result.stderr.trim() : '') || `tmux exited ${result.status ?? 'unknown'}`);
+    return paneIds.map((paneId) => unavailable(paneId, 'query_failed', detail));
+  }
+  const stdout = typeof result.stdout === 'string' ? result.stdout : '';
+  return paneIds.map((paneId) => parseExactPaneProof(paneId, stdout));
 }
 
 export function readExactPaneProof(paneId: string): Promise<ExactPaneProof> {

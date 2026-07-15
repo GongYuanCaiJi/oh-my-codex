@@ -561,7 +561,36 @@ async function resolveWorkerPaneTargetAsync(
   return proof.status === 'live' ? proof.paneId : null;
 }
 
-type AsyncPaneTargetResolver = () => Promise<string | null>;
+function createPinnedWorkerPaneTargetResolver(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId?: string,
+  expectedPanePid?: number,
+): AsyncPaneTargetResolver {
+  if (!hasExplicitWorkerPaneId(workerPaneId)) {
+    return () => resolveWorkerPaneTargetAsync(sessionName, workerIndex, workerPaneId);
+  }
+
+  let pinnedPid = expectedPanePid;
+  let lastResolvedPid: number | undefined;
+  const resolveTarget: AsyncPaneTargetResolver = async () => {
+    const proof = await readExactPaneProof(workerPaneId);
+    if (proof.status !== 'live') return null;
+    if (pinnedPid === undefined) {
+      pinnedPid = proof.pid;
+    } else if (proof.pid !== pinnedPid) {
+      throw new Error(`tmux pane identity changed: ${workerPaneId}`);
+    }
+    lastResolvedPid = proof.pid;
+    return proof.paneId;
+  };
+  resolveTarget.lastResolvedPid = () => lastResolvedPid;
+  return resolveTarget;
+}
+
+type AsyncPaneTargetResolver = (() => Promise<string | null>) & {
+  lastResolvedPid?: () => number | undefined;
+};
 
 async function requireAsyncPaneTarget(resolveTarget: AsyncPaneTargetResolver): Promise<string> {
   const target = await resolveTarget();
@@ -593,12 +622,19 @@ async function captureVisiblePaneAsync(resolveTarget: AsyncPaneTargetResolver): 
   return result.stdout;
 }
 
-async function isWorkerAliveAsync(sessionName: string, workerIndex: number, workerPaneId?: string): Promise<boolean> {
+async function isWorkerAliveAsync(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId?: string,
+  resolveTarget?: AsyncPaneTargetResolver,
+): Promise<boolean> {
   if (hasExplicitWorkerPaneId(workerPaneId)) {
-    const proof = await readExactPaneProof(workerPaneId);
-    if (proof.status !== 'live') return false;
+    const resolver = resolveTarget ?? createPinnedWorkerPaneTargetResolver(sessionName, workerIndex, workerPaneId);
+    const target = await resolver();
+    const pid = resolver.lastResolvedPid?.();
+    if (!target || typeof pid !== 'number') return false;
     try {
-      process.kill(proof.pid, 0);
+      process.kill(pid, 0);
       return true;
     } catch {
       return false;
@@ -2211,6 +2247,7 @@ export async function evaluateStartupDirectTriggerSafety(
 ): Promise<StartupDirectTriggerSafety> {
   if (!isTmuxAvailable()) return { safe: false, reason: 'tmux_unavailable' };
   const target = await resolveWorkerPaneTargetAsync(sessionName, workerIndex, workerPaneId);
+
   if (!target) return { safe: false, reason: 'capture_failed' };
   const result = await runTmuxAsync(sharedBuildVisibleCapturePaneArgv(target));
   if (!result.ok) return { safe: false, reason: 'capture_failed' };
@@ -2280,6 +2317,7 @@ export async function checkWorkerStartupInjectSafety(
   workerPaneId?: string,
 ): Promise<{ safe: true; reason: 'safe' } | { safe: false; reason: Exclude<WorkerStartupInjectSafety, 'safe'> }> {
   const resolveTarget = (): Promise<string | null> => resolveWorkerPaneTargetAsync(sessionName, workerIndex, workerPaneId);
+
   const visibleCapture = await captureVisiblePaneAsync(resolveTarget);
   const visibleSafety = classifyWorkerStartupInjectSafety(visibleCapture);
   if (visibleSafety === 'safe') return { safe: true, reason: 'safe' };
@@ -2531,6 +2569,7 @@ export async function waitForWorkerReadyAsync(
   let promptDismissed = false;
   const resolveTarget = (): Promise<string | null> => resolveWorkerPaneTargetAsync(sessionName, workerIndex, workerPaneId);
 
+
   const sendRobustEnter = async (): Promise<void> => {
     // Trust + follow-up splash can require two submits in Codex TUI.
     // Use C-m (carriage return) for raw-mode compatibility.
@@ -2668,10 +2707,14 @@ export async function sendToWorker(
   text: string,
   workerPaneId?: string,
   workerCli?: TeamWorkerCli,
+  expectedPanePid?: number,
+
 ): Promise<void> {
   assertWorkerTriggerText(text);
 
-  const resolveTarget = (): Promise<string | null> => resolveWorkerPaneTargetAsync(sessionName, workerIndex, workerPaneId);
+  const resolveTarget = createPinnedWorkerPaneTargetResolver(sessionName, workerIndex, workerPaneId, expectedPanePid);
+
+
   const strategy = resolveSendStrategyFromEnv();
   const resolvedWorkerCli = resolveWorkerCliForSend(workerIndex, workerCli);
 
@@ -2858,25 +2901,32 @@ export function isWorkerPaneOpen(sessionName: string, workerIndex: number, worke
 
 // Kill a specific worker: send C-c, then C-d, then kill-pane if still alive.
 // leaderPaneId: when provided, the kill is skipped entirely if workerPaneId matches it.
-export async function killWorker(sessionName: string, workerIndex: number, workerPaneId?: string, leaderPaneId?: string): Promise<void> {
+export async function killWorker(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId?: string,
+  leaderPaneId?: string,
+  expectedPanePid?: number,
+): Promise<void> {
   // Guard: never kill the leader's own pane.
   if (leaderPaneId && workerPaneId === leaderPaneId) return;
 
-  const initialTarget = await resolveWorkerPaneTargetAsync(sessionName, workerIndex, workerPaneId);
+  const resolveTarget = createPinnedWorkerPaneTargetResolver(sessionName, workerIndex, workerPaneId, expectedPanePid);
+  const initialTarget = await resolveTarget();
   if (!initialTarget) return;
   await runTmuxAsync(['send-keys', '-t', initialTarget, 'C-c']);
   await sleep(1000);
 
-  if (await isWorkerAliveAsync(sessionName, workerIndex, workerPaneId)) {
-    const exitTarget = await resolveWorkerPaneTargetAsync(sessionName, workerIndex, workerPaneId);
+  if (await isWorkerAliveAsync(sessionName, workerIndex, workerPaneId, resolveTarget)) {
+    const exitTarget = await resolveTarget();
     if (exitTarget) {
       await runTmuxAsync(['send-keys', '-t', exitTarget, 'C-d']);
       await sleep(1000);
     }
   }
 
-  if (await isWorkerAliveAsync(sessionName, workerIndex, workerPaneId)) {
-    const killTarget = await resolveWorkerPaneTargetAsync(sessionName, workerIndex, workerPaneId);
+  if (await isWorkerAliveAsync(sessionName, workerIndex, workerPaneId, resolveTarget)) {
+    const killTarget = await resolveTarget();
     if (killTarget) await runTmuxAsync(['kill-pane', '-t', killTarget]);
   }
 }

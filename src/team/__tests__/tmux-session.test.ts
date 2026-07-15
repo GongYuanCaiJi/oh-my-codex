@@ -6531,6 +6531,65 @@ esac
     );
   });
 
+  it('pins an explicit pane PID through an adaptive retry and rejects later pane-ID reuse', async () => {
+    await withMockTmuxFixture(
+      'omx-exact-pane-send-retry-pid-pin-',
+      (logPath) => `#!/bin/sh
+set -eu
+state_dir="$(dirname "${logPath}")"
+retry_file="$state_dir/retry"
+sent_file="$state_dir/sent"
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  list-panes)
+    if [ -f "$retry_file" ]; then
+      printf '%%9\t0\t2000000002\n'
+
+    else
+      printf '%%9\t0\t2000000001\n'
+
+    fi
+    ;;
+  capture-pane)
+    if [ -f "$sent_file" ]; then
+      cat <<'EOF'
+${READY_HELPER_CAPTURE}
+
+› check inbox
+EOF
+    else
+      cat <<'EOF'
+${READY_HELPER_CAPTURE}
+
+• Running tests (esc to interrupt)
+EOF
+    fi
+    ;;
+  send-keys)
+    case "$*" in
+      *" -l -- check inbox") : > "$sent_file" ;;
+      *" C-u") : > "$retry_file" ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+`,
+      async ({ logPath }) => {
+        await assert.rejects(
+          () => sendToWorker('ignored-session', 1, 'check inbox', '%9', undefined, 2000000001),
+          /tmux pane identity changed: %9/,
+        );
+        const commands = await readFile(logPath, 'utf-8');
+        assert.match(commands, /send-keys -t %9 C-u/);
+        assert.equal(
+          (commands.match(/send-keys -t %9 -l -- check inbox/g) || []).length,
+          1,
+          `the retry must not type into a reused pane:\n${commands}`,
+        );
+      },
+    );
+  });
+
   it('revalidates an explicit pane before later kill effects', async () => {
     await withMockTmuxFixture(
       'omx-exact-pane-kill-revalidation-',
@@ -6545,7 +6604,7 @@ case "$1" in
     if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
     count=$((count + 1))
     printf '%s' "$count" > "$count_file"
-    if [ "$count" -le 2 ]; then
+    if [ "$count" -le 4 ]; then
       printf '%%9\t0\t%s\n' "$PPID"
     fi
     ;;
@@ -6568,8 +6627,82 @@ esac
           assert.match(commands[index - 1] ?? '', exactGlobalPaneProof, `fresh proof must immediately precede ${command}`);
         }
         assert.match(commands.join('\n'), /send-keys -t %9 C-c/);
-        assert.doesNotMatch(commands.join('\n'), /send-keys -t %9 C-d/);
+        assert.match(commands.join('\n'), /send-keys -t %9 C-d/);
         assert.doesNotMatch(commands.join('\n'), /kill-pane -t %9/);
+      },
+    );
+  });
+  it('pins an explicit pane PID through later control and kill effects', async () => {
+    await withMockTmuxFixture(
+      'omx-exact-pane-kill-pid-pin-',
+      (logPath) => `#!/bin/sh
+set -eu
+state_dir="$(dirname "${logPath}")"
+exit_file="$state_dir/exit"
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  list-panes)
+    if [ -f "$exit_file" ]; then
+      printf '%%9\t0\t%s\n' "$((PPID + 1))"
+    else
+      printf '%%9\t0\t%s\n' "$PPID"
+    fi
+    ;;
+  send-keys)
+    case "$*" in
+      *" C-d") : > "$exit_file" ;;
+    esac
+    ;;
+  kill-pane) exit 0 ;;
+  *) exit 1 ;;
+esac
+`,
+      async ({ logPath }) => {
+        await assert.rejects(
+          () => killWorker('ignored-session', 1, '%9'),
+          /tmux pane identity changed: %9/,
+        );
+        const commands = await readFile(logPath, 'utf-8');
+        assert.match(commands, /send-keys -t %9 C-c/);
+        assert.match(commands, /send-keys -t %9 C-d/);
+        assert.doesNotMatch(commands, /kill-pane -t %9/);
+      },
+    );
+  });
+  it('uses the pinned liveness proof PID without an unconstrained second proof', async () => {
+    await withMockTmuxFixture(
+      'omx-exact-pane-kill-liveness-pid-pin-',
+      (logPath) => `#!/bin/sh
+set -eu
+state_dir="$(dirname "${logPath}")"
+count_file="$state_dir/list-count"
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  list-panes)
+    count=0
+    if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+    count=$((count + 1))
+    printf '%s' "$count" > "$count_file"
+    if [ "$count" -le 5 ]; then
+      printf '%%9\t0\t%s\n' "$PPID"
+    else
+      printf '%%9\t0\t999999999\n'
+    fi
+    ;;
+  send-keys|kill-pane) ;;
+  *) exit 1 ;;
+esac
+`,
+      async ({ logPath }) => {
+        await killWorker('ignored-session', 1, '%9');
+        const commands = await readFile(logPath, 'utf-8');
+        assert.match(commands, /send-keys -t %9 C-c/);
+        assert.match(commands, /send-keys -t %9 C-d/);
+        assert.equal(
+          (commands.match(/list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}/g) || []).length,
+          5,
+          `liveness must use its pinned proof rather than taking a second unconstrained proof:\n${commands}`,
+        );
       },
     );
   });
