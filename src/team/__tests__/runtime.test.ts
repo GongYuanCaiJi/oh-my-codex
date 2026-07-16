@@ -7711,6 +7711,179 @@ esac
     }
   });
 
+  it('shutdownTeam tears down a detached HUD only with its persisted PID and Team owner', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-detached-hud-shutdown-'));
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-detached-hud-shutdown-bin-',
+          tmuxScript: (tmuxLogPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  -V) echo 'tmux 3.4' ;;
+  list-panes)
+    case "$*" in
+      *'#{session_name}'*) printf '%%1\\t0\\t4241\\tomx-team-team-detached-hud-shutdown\\n' ;;
+      *'-a -F #{pane_id}'*)
+        printf '%%1\\t0\\t4241\\n'
+        [ -f "${tmuxLogPath}.hud-killed" ] || printf '%%2\\t0\\t4242\\n'
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  show-option|show-options) echo 'team:team-detached-hud-shutdown' ;;
+  kill-pane) : > "${tmuxLogPath}.hud-killed" ;;
+  kill-session) exit 0 ;;
+  *) exit 0 ;;
+esac
+`,
+        },
+        async ({ tmuxLogPath }) => {
+          const teamName = 'team-detached-hud-shutdown';
+          await initTeamState(teamName, 'detached HUD shutdown', 'executor', 1, cwd);
+          const config = await readTeamConfig(teamName, cwd);
+          assert.ok(config);
+          if (!config) return;
+          config.tmux_session = 'omx-team-team-detached-hud-shutdown';
+          config.leader_pane_id = '%1';
+          config.leader_pane_pid = 4241;
+          config.hud_pane_id = '%2';
+          config.hud_pane_pid = 4242;
+          config.tmux_pane_owner_id = 'team:team-detached-hud-shutdown';
+          config.workers[0]!.pane_id = '';
+          config.workers[0]!.pid = undefined;
+          await saveTeamConfig(config, cwd);
+
+          await shutdownTeam(teamName, cwd, { force: true });
+
+          const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+          assert.match(tmuxLog, /kill-pane -t %2/);
+          assert.match(tmuxLog, /kill-session -t omx-team-team-detached-hud-shutdown/);
+        },
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('shutdownTeam fails closed when detached HUD PID changes before teardown', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-detached-hud-pid-takeover-'));
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-detached-hud-pid-takeover-bin-',
+          tmuxScript: (tmuxLogPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  -V) echo 'tmux 3.4' ;;
+  list-panes)
+    case "$*" in
+      *'-a -F #{pane_id}'*)
+        printf '%%1\\t0\\t4241\\n'
+        if [ -f "${tmuxLogPath}.hud-first-proof" ]; then printf '%%2\\t0\\t5252\\n'; else : > "${tmuxLogPath}.hud-first-proof"; printf '%%2\\t0\\t4242\\n'; fi
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  show-option|show-options) echo 'team:team-dethud-pid' ;;
+  kill-pane|kill-session) exit 99 ;;
+  *) exit 0 ;;
+esac
+`,
+        },
+        async ({ tmuxLogPath }) => {
+          const teamName = 'team-dethud-pid';
+          await initTeamState(teamName, 'detached HUD PID takeover', 'executor', 1, cwd);
+          const config = await readTeamConfig(teamName, cwd);
+          assert.ok(config);
+          if (!config) return;
+          config.tmux_session = 'omx-team-team-dethud-pid';
+          config.leader_pane_id = '%1';
+          config.leader_pane_pid = 4241;
+          config.hud_pane_id = '%2';
+          config.hud_pane_pid = 4242;
+          config.tmux_pane_owner_id = 'team:team-dethud-pid';
+          config.workers[0]!.pane_id = '';
+          config.workers[0]!.pid = undefined;
+          await saveTeamConfig(config, cwd);
+
+          await assert.rejects(
+            () => shutdownTeam(teamName, cwd, { force: true }),
+            /shutdown_detached_session_HUD_pane_identity_changed:%2/,
+          );
+
+          const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+          assert.doesNotMatch(tmuxLog, /kill-pane -t %2|kill-session -t omx-team-team-dethud-pid/);
+        },
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('shutdownTeam fails closed when detached HUD ownership changes before teardown', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-detached-hud-owner-takeover-'));
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-detached-hud-owner-takeover-bin-',
+          tmuxScript: (tmuxLogPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  -V) echo 'tmux 3.4' ;;
+  list-panes)
+    case "$*" in
+      *'#{session_name}'*) printf '%%1\t0\t4241\tomx-team-team-dethud-owner\n' ;;
+      *'-a -F #{pane_id}'*) printf '%%1\t0\t4241\n%%2\t0\t4242\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  show-option|show-options)
+    case "$*" in
+      *'%2'*)
+        if [ -f "${tmuxLogPath}.hud-owner-read" ]; then echo 'team:foreign'; else : > "${tmuxLogPath}.hud-owner-read"; echo 'team:team-dethud-owner'; fi
+        ;;
+      *) echo 'team:team-dethud-owner' ;;
+    esac
+    ;;
+  kill-pane|kill-session) exit 99 ;;
+  *) exit 0 ;;
+esac
+`,
+        },
+        async ({ tmuxLogPath }) => {
+          const teamName = 'team-dethud-owner';
+          await initTeamState(teamName, 'detached HUD owner takeover', 'executor', 1, cwd);
+          const config = await readTeamConfig(teamName, cwd);
+          assert.ok(config);
+          if (!config) return;
+          config.tmux_session = 'omx-team-team-dethud-owner';
+          config.leader_pane_id = '%1';
+          config.leader_pane_pid = 4241;
+          config.hud_pane_id = '%2';
+          config.hud_pane_pid = 4242;
+          config.tmux_pane_owner_id = 'team:team-dethud-owner';
+          config.workers[0]!.pane_id = '';
+          config.workers[0]!.pid = undefined;
+          await saveTeamConfig(config, cwd);
+
+          await assert.rejects(
+            () => shutdownTeam(teamName, cwd, { force: true }),
+            /shutdown_detached_session_HUD_pane_owner_changed:%2/,
+          );
+
+          const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+          assert.doesNotMatch(tmuxLog, /kill-pane -t %2|kill-session -t omx-team-team-dethud-owner/);
+        },
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('shutdownTeam rejects a recycled detached session before kill-session', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-detached-session-recycled-'));
     try {

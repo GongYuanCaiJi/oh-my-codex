@@ -4776,17 +4776,18 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       authorization: FrozenSharedPaneAuthorization,
       kind: 'HUD pane' | 'restore leader pane',
     ): void => {
+      const scope = sharedSessionTopology ? 'shared_session' : 'detached_session';
       const proof = readExactPaneProofSync(authorization.paneId);
       if (proof.status !== 'live' || proof.pid !== authorization.pid) {
-        throw new Error(`shutdown_shared_session_${kind.replaceAll(' ', '_')}_identity_changed:${authorization.paneId}`);
+        throw new Error(`shutdown_${scope}_${kind.replaceAll(' ', '_')}_identity_changed:${authorization.paneId}`);
       }
       const owner = readPaneTeamOwnerTagResult(authorization.paneId);
       if (owner.status === 'error') {
-        throw new Error(`shutdown_shared_session_${kind.replaceAll(' ', '_')}_owner_unavailable:${authorization.paneId}:${owner.error}`);
+        throw new Error(`shutdown_${scope}_${kind.replaceAll(' ', '_')}_owner_unavailable:${authorization.paneId}:${owner.error}`);
       }
       const currentOwner = owner.status === 'value' ? owner.value : null;
       if (currentOwner !== authorization.owner) {
-        throw new Error(`shutdown_shared_session_${kind.replaceAll(' ', '_')}_owner_changed:${authorization.paneId}`);
+        throw new Error(`shutdown_${scope}_${kind.replaceAll(' ', '_')}_owner_changed:${authorization.paneId}`);
       }
     };
     const persistedHudPaneId = typeof hudPaneId === 'string' && /^%[0-9]+$/.test(hudPaneId)
@@ -4796,19 +4797,40 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       ? leaderPaneId
       : null;
     if (persistedHudPaneId && effectiveHudPaneId === persistedHudPaneId && (typeof hudPanePid !== 'number' || !Number.isSafeInteger(hudPanePid) || hudPanePid <= 0)) {
-      throw new Error(`shutdown_shared_session_HUD_pane_pid_missing:${effectiveHudPaneId}`);
+      const scope = sharedSessionTopology ? 'shared_session' : 'detached_session';
+      throw new Error(`shutdown_${scope}_HUD_pane_pid_missing:${effectiveHudPaneId}`);
     }
+    const frozenHudAuthorization = effectiveHudPaneId
+      ? (sharedSessionTopology
+        ? freezeSharedPaneAuthorization(
+          effectiveHudPaneId,
+          'HUD pane',
+          true,
+          effectiveHudPaneId === persistedHudPaneId ? hudPanePid : undefined,
+        )
+        : (() => {
+          if (!persistedHudPaneId || effectiveHudPaneId !== persistedHudPaneId || !tmuxPaneOwnerId
+            || typeof hudPanePid !== 'number' || !Number.isSafeInteger(hudPanePid) || hudPanePid <= 0) {
+            throw new Error(`shutdown_detached_session_HUD_pane_authorization_unavailable:${effectiveHudPaneId}`);
+          }
+          const proof = readExactPaneProofSync(effectiveHudPaneId);
+          if (proof.status !== 'live' || proof.pid !== hudPanePid) {
+            throw new Error(`shutdown_detached_session_HUD_pane_identity_changed:${effectiveHudPaneId}`);
+          }
+          const owner = readPaneTeamOwnerTagResult(proof.paneId);
+          if (owner.status !== 'value' || owner.value !== tmuxPaneOwnerId) {
+            throw new Error(`shutdown_detached_session_HUD_pane_owner_changed:${effectiveHudPaneId}`);
+          }
+          const finalProof = readExactPaneProofSync(proof.paneId);
+          if (finalProof.status !== 'live' || finalProof.pid !== hudPanePid) {
+            throw new Error(`shutdown_detached_session_HUD_pane_identity_changed:${effectiveHudPaneId}`);
+          }
+          return { paneId: finalProof.paneId, pid: hudPanePid, owner: tmuxPaneOwnerId };
+        })())
+      : null;
     if (persistedLeaderPaneId && trustedHudRestoreLeaderPaneId === persistedLeaderPaneId && (typeof leaderPanePid !== 'number' || !Number.isSafeInteger(leaderPanePid) || leaderPanePid <= 0)) {
       throw new Error(`shutdown_shared_session_restore_leader_pane_pid_missing:${trustedHudRestoreLeaderPaneId}`);
     }
-    const frozenHudAuthorization = sharedSessionTopology && effectiveHudPaneId
-      ? freezeSharedPaneAuthorization(
-        effectiveHudPaneId,
-        'HUD pane',
-        true,
-        effectiveHudPaneId === persistedHudPaneId ? hudPanePid : undefined,
-      )
-      : null;
     const frozenRestoreLeaderAuthorization = sharedSessionTopology && trustedHudRestoreLeaderPaneId
       ? freezeSharedPaneAuthorization(
         trustedHudRestoreLeaderPaneId,
