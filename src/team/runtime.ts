@@ -35,7 +35,8 @@ import {
   reconcileRestoredHudCleanupDebtSync,
   teardownWorkerPanes,
   unregisterResizeHook,
-  destroyTeamSession,
+  queryDetachedTeamSession,
+  requestDetachedTeamSessionDestroy,
   listPaneIds,
   listTeamSessions,
   resolveSharedSessionShutdownTopology,
@@ -574,39 +575,156 @@ function hasAuthoritativeDetachedSessionLeaderBinding(params: {
   return matched;
 }
 
-function destroyConfiguredDetachedTeamSession(config: TeamConfig): void {
+
+type DetachedSessionDestroyReceipt = {
+  schema_version: 1;
+  schema: 'omx.detached_session_destroy.v1';
+  operation: 'detached_session_destroy';
+  status: 'intent' | 'accepted';
+  session_name: string;
+  leader_pane_id: string;
+  leader_pane_pid: number;
+  owner_id: string;
+};
+
+function detachedSessionDestroyReceiptPath(teamName: string, cwd: string, config?: TeamConfig | null): string {
+  const stateRoot = config?.team_state_root ?? resolveCanonicalTeamStateRoot(cwd);
+  return join(stateRoot, 'team', teamName, '.detached-session-destroy-receipt.json');
+}
+
+function isDetachedSessionDestroyReceipt(value: unknown): value is DetachedSessionDestroyReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const receipt = value as Record<string, unknown>;
+  return receipt.schema_version === 1
+    && receipt.schema === 'omx.detached_session_destroy.v1'
+    && receipt.operation === 'detached_session_destroy'
+    && (receipt.status === 'intent' || receipt.status === 'accepted')
+    && typeof receipt.session_name === 'string' && receipt.session_name.length > 0 && !receipt.session_name.includes(':')
+    && typeof receipt.leader_pane_id === 'string' && /^%[0-9]+$/.test(receipt.leader_pane_id)
+    && typeof receipt.leader_pane_pid === 'number' && Number.isSafeInteger(receipt.leader_pane_pid) && receipt.leader_pane_pid > 0
+    && typeof receipt.owner_id === 'string' && receipt.owner_id.length > 0;
+}
+
+async function readDetachedSessionDestroyReceipt(
+  teamName: string,
+  cwd: string,
+  config: TeamConfig | null,
+): Promise<DetachedSessionDestroyReceipt | null> {
+  const path = detachedSessionDestroyReceiptPath(teamName, cwd, config);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf-8')) as unknown;
+    if (!isDetachedSessionDestroyReceipt(parsed)) throw new Error('invalid receipt');
+    return parsed;
+  } catch {
+    throw new Error(`detached_session_destroy_receipt_malformed:${config?.tmux_session || 'missing_session'}`);
+  }
+}
+
+async function writeDetachedSessionDestroyReceipt(
+  teamName: string,
+  cwd: string,
+  config: TeamConfig | null,
+  receipt: DetachedSessionDestroyReceipt,
+): Promise<void> {
+  await writeAtomic(detachedSessionDestroyReceiptPath(teamName, cwd, config), `${JSON.stringify(receipt, null, 2)}\n`);
+}
+
+function assertDetachedSessionDestroyAuthority(receipt: DetachedSessionDestroyReceipt): void {
+  if (!hasAuthoritativeDetachedSessionLeaderBinding({
+    sessionName: receipt.session_name,
+    leaderPaneId: receipt.leader_pane_id,
+    leaderPanePid: receipt.leader_pane_pid,
+  })) {
+    throw new Error(`detached_session_destroy_authorization_unavailable:${receipt.session_name}`);
+  }
+  const proof = readExactPaneProofSync(receipt.leader_pane_id);
+  if (proof.status !== 'live' || proof.pid !== receipt.leader_pane_pid) {
+    throw new Error(`detached_session_destroy_authorization_unavailable:${receipt.session_name}`);
+  }
+  const owner = readPaneTeamOwnerTagResult(proof.paneId);
+  if (owner.status !== 'value' || owner.value !== receipt.owner_id) {
+    throw new Error(`detached_session_destroy_authorization_unavailable:${receipt.session_name}`);
+  }
+}
+
+async function convergeDetachedSessionDestroyReceipt(
+  teamName: string,
+  cwd: string,
+  config: TeamConfig | null,
+  receipt: DetachedSessionDestroyReceipt,
+): Promise<boolean> {
+  const query = queryDetachedTeamSession(receipt.session_name);
+  if (query.status === 'unavailable') {
+    throw new Error(`detached_session_destroy_unresolved:${receipt.session_name}`);
+  }
+  if (query.status === 'absent') {
+    if (config) {
+      config.tmux_session = '';
+      await saveTeamConfig(config, cwd);
+    }
+    // Retain the converged receipt until final Team directory cleanup. A later
+    // shutdown failure must not erase the accepted-kill recovery evidence.
+    return true;
+  }
+
+  // A live same-name session is never enough authority. Re-kill only the exact
+  // original leader pane/PID/owner incarnation frozen in the receipt.
+  assertDetachedSessionDestroyAuthority(receipt);
+  if (!requestDetachedTeamSessionDestroy(receipt.session_name)) {
+    throw new Error(`detached_session_destroy_unresolved:${receipt.session_name}`);
+  }
+  await writeDetachedSessionDestroyReceipt(teamName, cwd, config, { ...receipt, status: 'accepted' });
+  const afterKill = queryDetachedTeamSession(receipt.session_name);
+  if (afterKill.status === 'absent') {
+    if (config) {
+      config.tmux_session = '';
+      await saveTeamConfig(config, cwd);
+    }
+    // Retain the converged receipt until final Team directory cleanup. A later
+    // shutdown failure must not erase the accepted-kill recovery evidence.
+    return true;
+  }
+  throw new Error(`detached_session_destroy_unresolved:${receipt.session_name}`);
+}
+
+async function reconcileDetachedSessionDestroyReceipt(
+  teamName: string,
+  cwd: string,
+  config: TeamConfig | null,
+): Promise<boolean> {
+  const receipt = await readDetachedSessionDestroyReceipt(teamName, cwd, config);
+  if (!receipt) return false;
+  return await convergeDetachedSessionDestroyReceipt(teamName, cwd, config, receipt);
+}
+
+async function destroyConfiguredDetachedTeamSession(teamName: string, cwd: string, config: TeamConfig): Promise<void> {
   const sessionName = config.tmux_session;
   const ownerId = typeof config.tmux_pane_owner_id === 'string' ? config.tmux_pane_owner_id.trim() : '';
   const leaderPaneId = typeof config.leader_pane_id === 'string' ? config.leader_pane_id.trim() : '';
   const leaderPanePid = config.leader_pane_pid;
-  // An empty session is explicit persisted evidence that no detached session was
-  // created or remains. It authorizes state cleanup, never a tmux effect.
   if (!sessionName) return;
   if (sessionName.includes(':') || !ownerId || !/^%[0-9]+$/.test(leaderPaneId)
     || typeof leaderPanePid !== 'number' || !Number.isSafeInteger(leaderPanePid) || leaderPanePid <= 0) {
     throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName || 'missing_session'}`);
   }
-  // These are the final authorization observations before the destructive tmux
-  // effect. The session binding is read first so the exact pane PID and owner
-  // reads immediately adjacent to kill-session cannot authorize a replacement.
-  if (!hasAuthoritativeDetachedSessionLeaderBinding({
-    sessionName,
-    leaderPaneId,
-    leaderPanePid,
-  })) {
-    throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName}`);
-  }
-  const adjacentProof = readExactPaneProofSync(leaderPaneId);
-  if (adjacentProof.status !== 'live' || adjacentProof.pid !== leaderPanePid) {
-    throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName}`);
-  }
-  const adjacentOwner = readPaneTeamOwnerTagResult(adjacentProof.paneId);
-  if (adjacentOwner.status !== 'value' || adjacentOwner.value !== ownerId) {
-    throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName}`);
-  }
-  if (!destroyTeamSession(sessionName)) {
+  const receipt: DetachedSessionDestroyReceipt = {
+    schema_version: 1,
+    schema: 'omx.detached_session_destroy.v1',
+    operation: 'detached_session_destroy',
+    status: 'intent',
+    session_name: sessionName,
+    leader_pane_id: leaderPaneId,
+    leader_pane_pid: leaderPanePid,
+    owner_id: ownerId,
+  };
+  assertDetachedSessionDestroyAuthority(receipt);
+  await writeDetachedSessionDestroyReceipt(teamName, cwd, config, receipt);
+  if (!requestDetachedTeamSessionDestroy(sessionName)) {
     throw new Error(`detached_session_destroy_unresolved:${sessionName}`);
   }
+  await writeDetachedSessionDestroyReceipt(teamName, cwd, config, { ...receipt, status: 'accepted' });
+  await convergeDetachedSessionDestroyReceipt(teamName, cwd, config, { ...receipt, status: 'accepted' });
 }
 
 interface UnavailablePaneProof {
@@ -3970,7 +4088,7 @@ export async function startTeam(
       } else {
         try {
           if (!config) throw new Error('detached_session_destroy_authorization_unavailable:missing_config');
-          destroyConfiguredDetachedTeamSession(config);
+          await destroyConfiguredDetachedTeamSession(sanitized, leaderCwd, config);
         } catch (cleanupError) {
           preserveRollbackState = true;
           rollbackErrors.push(`destroyTeamSession: ${String(cleanupError)}`);
@@ -4484,6 +4602,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
   const sanitized = resolveTeamNameForCurrentContext(teamName, cwd);
   const config = await readTeamConfig(sanitized, cwd);
   if (!config) {
+    await reconcileDetachedSessionDestroyReceipt(sanitized, cwd, null);
     await reconcileGonePaneDescendantCleanupDebt(sanitized, cwd);
     // A missing config is not authority over a conventionally named tmux
     // session. It may be another team's or a recycled user session.
@@ -4492,6 +4611,10 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     restoreTeamModelInstructionsFile(sanitized);
     return { commitHygieneArtifacts: null };
   }
+  // Reconcile accepted detached-session destruction before any other shutdown
+  // effect. A receipt is the only durable authority across the kill/query crash
+  // window and is deliberately fail-closed on malformed or unavailable input.
+  await reconcileDetachedSessionDestroyReceipt(sanitized, cwd, config);
   const restoredHudDebtRoot = join(config.team_state_root ?? resolveCanonicalTeamStateRoot(cwd), 'team', sanitized);
   const configuredRestoredHudPaneId = typeof config.hud_pane_id === 'string' && /^%[0-9]+$/.test(config.hud_pane_id)
     ? config.hud_pane_id
@@ -5079,7 +5202,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
 
     // 4. Destroy a detached session only after an authoritative leader proof.
     if (!sessionName.includes(':')) {
-      destroyConfiguredDetachedTeamSession(config);
+      await destroyConfiguredDetachedTeamSession(sanitized, cwd, config);
     }
   } else {
     const promptTeardownFailures: string[] = [];

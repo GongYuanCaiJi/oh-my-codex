@@ -302,6 +302,32 @@ fn exec_compact_immediately_persists_only_nonterminal_dispatch_records() {
     assert_eq!(records[1]["request_id"], "notified");
     assert_eq!(records[1]["status"], "notified");
 
+    run_exec(r#"{"command":"CaptureSnapshot"}"#, false);
+    let reloaded_dispatch: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("dispatch.json"))
+            .expect("read reload-persisted dispatch view"),
+    )
+    .expect("valid reload-persisted dispatch JSON");
+    let reloaded_records = reloaded_dispatch["records"]
+        .as_array()
+        .expect("reload-persisted dispatch records array");
+    assert_eq!(reloaded_records.len(), records.len());
+    for (immediate, reloaded) in records.iter().zip(reloaded_records) {
+        for field in ["request_id", "target", "status", "metadata", "reason"] {
+            assert_eq!(reloaded[field], immediate[field], "semantic field {field}");
+        }
+    }
+
+    let snapshot: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("snapshot.json"))
+            .expect("read reload-persisted snapshot"),
+    )
+    .expect("valid reload-persisted snapshot JSON");
+    assert_eq!(snapshot["backlog"]["pending"], 1);
+    assert_eq!(snapshot["backlog"]["notified"], 1);
+    assert_eq!(snapshot["backlog"]["delivered"], 0);
+    assert_eq!(snapshot["backlog"]["failed"], 0);
+
     let events: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.join("events.json")).expect("read compacted events"),
     )
@@ -314,5 +340,10 @@ fn exec_compact_immediately_persists_only_nonterminal_dispatch_records() {
         .iter()
         .all(|event| { event["request_id"] != "delivered" && event["request_id"] != "failed" }));
 
+    let event_request_ids: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["request_id"].as_str())
+        .collect();
+    assert_eq!(event_request_ids, vec!["pending", "notified", "notified"]);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -4129,6 +4129,32 @@ function isFinalTmuxServerGone(result: ReturnType<typeof runTmux>): boolean {
   return !result.ok && /^no server running on .+$/i.test(result.stderr);
 }
 
+export type DetachedSessionQueryResult =
+  | { status: 'absent' }
+  | { status: 'present' }
+  | { status: 'unavailable'; detail: string };
+
+/**
+ * Queries only the base detached-session name. `no server running` is tmux's
+ * sole query-error proof of absence; every other failure remains unavailable.
+ */
+export function queryDetachedTeamSession(sessionName: string): DetachedSessionQueryResult {
+  const sessions = runTmux(['list-sessions', '-F', '#{session_name}']);
+  if (!sessions.ok) {
+    return isFinalTmuxServerGone(sessions)
+      ? { status: 'absent' }
+      : { status: 'unavailable', detail: sessions.stderr };
+  }
+  return parseTeamSessionNames(sessions.stdout).includes(baseSessionName(sessionName))
+    ? { status: 'present' }
+    : { status: 'absent' };
+}
+
+/** Records tmux accepting the destructive effect separately from its proof. */
+export function requestDetachedTeamSessionDestroy(sessionName: string): boolean {
+  return runTmux(['kill-session', '-t', sessionName]).ok;
+}
+
 export function destroyTeamSession(sessionName: string): boolean {
   const result = runTmux(['kill-session', '-t', sessionName]);
   if (!result.ok) return false;

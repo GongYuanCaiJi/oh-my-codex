@@ -131,7 +131,8 @@ impl RuntimeEngine {
                 target,
                 metadata,
             } => {
-                self.dispatch.queue(&request_id, &target, metadata.clone());
+                self.dispatch
+                    .queue(&request_id, &target, metadata.clone())?;
                 RuntimeEvent::DispatchQueued {
                     request_id,
                     target,
@@ -163,7 +164,7 @@ impl RuntimeEngine {
                     .retain(|event| !dispatch_event_matches_request_ids(event, &request_id_set));
                 self.dispatch = DispatchLog::new();
                 for event in &self.event_log {
-                    replay_dispatch_event(&mut self.dispatch, event);
+                    replay_dispatch_event(&mut self.dispatch, event)?;
                 }
                 RuntimeEvent::DispatchRecordsRemoved { request_ids }
             }
@@ -318,7 +319,7 @@ impl RuntimeEngine {
         let mut engine = Self::new().with_state_dir(&dir);
         // Replay all events to rebuild state
         for event in &events {
-            replay_event(&mut engine, event);
+            replay_event(&mut engine, event)?;
         }
 
         if let Some(mailbox_state) = mailbox {
@@ -373,7 +374,10 @@ fn dispatch_event_matches_request_ids(
     }
 }
 
-fn replay_dispatch_event(dispatch: &mut DispatchLog, event: &RuntimeEvent) {
+fn replay_dispatch_event(
+    dispatch: &mut DispatchLog,
+    event: &RuntimeEvent,
+) -> Result<(), DispatchError> {
     match event {
         RuntimeEvent::DispatchQueued {
             request_id,
@@ -383,20 +387,16 @@ fn replay_dispatch_event(dispatch: &mut DispatchLog, event: &RuntimeEvent) {
         RuntimeEvent::DispatchNotified {
             request_id,
             channel,
-        } => {
-            let _ = dispatch.mark_notified(request_id, channel);
-        }
-        RuntimeEvent::DispatchDelivered { request_id } => {
-            let _ = dispatch.mark_delivered(request_id);
-        }
+        } => dispatch.mark_notified(request_id, channel),
+        RuntimeEvent::DispatchDelivered { request_id } => dispatch.mark_delivered(request_id),
         RuntimeEvent::DispatchFailed { request_id, reason } => {
-            let _ = dispatch.mark_failed(request_id, reason);
+            dispatch.mark_failed(request_id, reason)
         }
-        _ => {}
+        _ => Ok(()),
     }
 }
 
-fn replay_event(engine: &mut RuntimeEngine, event: &RuntimeEvent) {
+fn replay_event(engine: &mut RuntimeEngine, event: &RuntimeEvent) -> Result<(), DispatchError> {
     match event {
         RuntimeEvent::AuthorityAcquired {
             owner,
@@ -412,30 +412,9 @@ fn replay_event(engine: &mut RuntimeEngine, event: &RuntimeEvent) {
         } => {
             let _ = engine.authority.renew(owner, lease_id, leased_until);
         }
-        RuntimeEvent::DispatchQueued {
-            request_id,
-            target,
-            metadata,
-        } => {
-            engine.dispatch.queue(request_id, target, metadata.clone());
-        }
-        RuntimeEvent::DispatchNotified {
-            request_id,
-            channel,
-        } => {
-            let _ = engine.dispatch.mark_notified(request_id, channel);
-        }
-        RuntimeEvent::DispatchDelivered { request_id } => {
-            let _ = engine.dispatch.mark_delivered(request_id);
-        }
-        RuntimeEvent::DispatchFailed { request_id, reason } => {
-            let _ = engine.dispatch.mark_failed(request_id, reason);
-        }
-        RuntimeEvent::DispatchRecordsRemoved { .. } => {}
         RuntimeEvent::ReplayRequested { cursor } => {
             engine.replay.request_replay(cursor.clone());
         }
-        RuntimeEvent::SnapshotCaptured => {}
         RuntimeEvent::MailboxMessageCreated {
             message_id,
             from_worker,
@@ -455,7 +434,10 @@ fn replay_event(engine: &mut RuntimeEngine, event: &RuntimeEvent) {
         RuntimeEvent::MailboxDelivered { message_id } => {
             let _ = engine.mailbox.mark_delivered(message_id);
         }
+        RuntimeEvent::DispatchRecordsRemoved { .. } | RuntimeEvent::SnapshotCaptured => {}
+        event => replay_dispatch_event(&mut engine.dispatch, event)?,
     }
+    Ok(())
 }
 
 pub fn derive_readiness(
@@ -958,5 +940,138 @@ mod tests {
             remaining[0],
             RuntimeEvent::DispatchQueued { request_id, .. } if request_id == "req-pending"
         ));
+    }
+
+    #[test]
+    fn queue_dispatch_rejects_duplicate_ids_before_and_after_terminal_lifecycle() {
+        let mut engine = RuntimeEngine::new();
+        engine
+            .process(RuntimeCommand::QueueDispatch {
+                request_id: "req-duplicate".into(),
+                target: "worker-1".into(),
+                metadata: None,
+            })
+            .unwrap();
+
+        let pending_duplicate = engine
+            .process(RuntimeCommand::QueueDispatch {
+                request_id: "req-duplicate".into(),
+                target: "worker-2".into(),
+                metadata: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            pending_duplicate,
+            EngineError::Dispatch(DispatchError::DuplicateRequestId { .. })
+        ));
+
+        engine
+            .process(RuntimeCommand::MarkFailed {
+                request_id: "req-duplicate".into(),
+                reason: "unavailable".into(),
+            })
+            .unwrap();
+        let terminal_duplicate = engine
+            .process(RuntimeCommand::QueueDispatch {
+                request_id: "req-duplicate".into(),
+                target: "worker-3".into(),
+                metadata: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            terminal_duplicate,
+            EngineError::Dispatch(DispatchError::DuplicateRequestId { .. })
+        ));
+        assert_eq!(engine.event_log().len(), 2);
+    }
+
+    #[test]
+    fn load_rejects_duplicate_and_out_of_order_legacy_dispatch_events() {
+        let cases = [
+            (
+                "duplicate",
+                vec![
+                    RuntimeEvent::DispatchQueued {
+                        request_id: "req-1".into(),
+                        target: "worker-1".into(),
+                        metadata: None,
+                    },
+                    RuntimeEvent::DispatchQueued {
+                        request_id: "req-1".into(),
+                        target: "worker-2".into(),
+                        metadata: None,
+                    },
+                ],
+                "duplicate dispatch request id: req-1",
+            ),
+            (
+                "out-of-order",
+                vec![RuntimeEvent::DispatchDelivered {
+                    request_id: "req-1".into(),
+                }],
+                "dispatch record not found: req-1",
+            ),
+        ];
+
+        for (name, events, expected_error) in cases {
+            let dir = std::env::temp_dir().join(format!("omx-runtime-test-malformed-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("events.json"),
+                serde_json::to_string(&events).unwrap(),
+            )
+            .unwrap();
+
+            let err = match RuntimeEngine::load(&dir) {
+                Ok(_) => panic!("malformed dispatch event log loaded successfully"),
+                Err(err) => err,
+            };
+            assert!(err.to_string().contains(expected_error));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn compact_persist_reload_is_idempotent_and_preserves_unrelated_dispatches() {
+        let dir = std::env::temp_dir().join("omx-runtime-test-compact-idempotent");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut engine = RuntimeEngine::new().with_state_dir(&dir);
+
+        for request_id in ["pending", "terminal"] {
+            engine
+                .process(RuntimeCommand::QueueDispatch {
+                    request_id: request_id.into(),
+                    target: format!("worker-{request_id}"),
+                    metadata: None,
+                })
+                .unwrap();
+        }
+        engine
+            .process(RuntimeCommand::MarkFailed {
+                request_id: "terminal".into(),
+                reason: "target unavailable".into(),
+            })
+            .unwrap();
+        engine.compact();
+        engine.persist().unwrap();
+
+        let immediate_dispatch: DispatchLog =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("dispatch.json")).unwrap())
+                .unwrap();
+        assert_eq!(immediate_dispatch.records().len(), 1);
+        assert_eq!(immediate_dispatch.records()[0].request_id, "pending");
+
+        let mut loaded = RuntimeEngine::load(&dir).unwrap();
+        assert_eq!(loaded.snapshot().backlog, engine.snapshot().backlog);
+        assert_eq!(loaded.event_log(), engine.event_log());
+        loaded.compact();
+        assert_eq!(loaded.event_log(), engine.event_log());
+        loaded.persist().unwrap();
+
+        let reloaded = RuntimeEngine::load(&dir).unwrap();
+        assert_eq!(reloaded.snapshot().backlog, engine.snapshot().backlog);
+        assert_eq!(reloaded.event_log(), engine.event_log());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
