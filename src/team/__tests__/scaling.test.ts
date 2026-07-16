@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, readFile, writeFile, mkdir, chmod, readdir, symlink } from 'fs/promises';
-import { join, relative } from 'path';
+import { join, posix, relative, win32 } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, readFileSync } from 'fs';
 import {
@@ -22,7 +22,7 @@ import {
   listDispatchRequests,
   readTeamManifestV2,
 } from '../state.js';
-import { isScalingEnabled, reconcileScaleDownCleanupDebt, scaleUp, scaleDown } from '../scaling.js';
+import { isSameOrInsidePath, isScalingEnabled, reconcileScaleDownCleanupDebt, scaleUp, scaleDown } from '../scaling.js';
 import { resolveCanonicalTeamStateRoot } from '../state-root.js';
 import {
   resolvePersistedApprovedTeamExecutionContinuityState,
@@ -464,6 +464,48 @@ describe('isScalingEnabled', () => {
   });
 });
 
+// ── scale-down cleanup debt path containment ──────────────────────────────────
+
+describe('scale-down cleanup debt path containment', () => {
+  const windowsPathSemantics = {
+    relative: win32.relative,
+    isAbsolute: win32.isAbsolute,
+    sep: win32.sep,
+  };
+
+  it('accepts same-root and descendant native Windows canonical paths', () => {
+    assert.equal(isSameOrInsidePath('C:\\repo', 'C:\\repo', windowsPathSemantics), true);
+    assert.equal(isSameOrInsidePath('C:\\repo\\.omx\\team\\alpha', 'C:\\repo', windowsPathSemantics), true);
+  });
+
+  for (const [name, candidate] of [
+    ['a sibling prefix collision', 'C:\\repo-other\\worker'],
+    ['a parent traversal escape', 'C:\\repo\\..\\foreign\\worker'],
+    ['a foreign same-volume root', 'C:\\foreign\\worker'],
+    ['an absolute relative result from a foreign drive', 'D:\\foreign\\worker'],
+  ] as const) {
+    it(`rejects ${name} under native Windows path semantics`, () => {
+      assert.equal(isSameOrInsidePath(candidate, 'C:\\repo', windowsPathSemantics), false);
+    });
+  }
+
+  const posixPathSemantics = {
+    relative: posix.relative,
+    isAbsolute: posix.isAbsolute,
+    sep: posix.sep,
+  };
+
+  it('preserves POSIX same-root and descendant containment', () => {
+    assert.equal(isSameOrInsidePath('/repo', '/repo', posixPathSemantics), true);
+    assert.equal(isSameOrInsidePath('/repo/.omx/team/alpha', '/repo', posixPathSemantics), true);
+  });
+
+  it('rejects POSIX siblings, traversal, and foreign roots', () => {
+    assert.equal(isSameOrInsidePath('/repo-other/worker', '/repo', posixPathSemantics), false);
+    assert.equal(isSameOrInsidePath('/repo/../foreign/worker', '/repo', posixPathSemantics), false);
+    assert.equal(isSameOrInsidePath('/foreign/worker', '/repo', posixPathSemantics), false);
+  });
+});
 // ── WorkerStatus draining state ───────────────────────────────────────────────
 
 describe('WorkerStatus draining state', () => {

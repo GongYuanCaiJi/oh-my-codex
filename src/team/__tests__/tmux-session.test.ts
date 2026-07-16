@@ -3626,13 +3626,29 @@ esac
     );
   });
 
-  it('does not accept a session kill when the absence query fails', async () => {
+  it('accepts final-session destruction when tmux reports its expected no-server absence', async () => {
+    await withMockTmuxFixture(
+      'omx-destroy-final-team-session-',
+      () => `#!/bin/sh
+case "$1" in
+  kill-session) exit 0 ;;
+  list-sessions) printf '%s\\n' 'no server running on /tmp/tmux-1000/default' >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+`,
+      async () => {
+        assert.equal(destroyTeamSession('omx-team-final-session'), true);
+      },
+    );
+  });
+
+  it('does not accept a session kill when the absence query fails for another reason', async () => {
     await withMockTmuxFixture(
       'omx-destroy-team-session-query-failure-',
       () => `#!/bin/sh
 case "$1" in
   kill-session) exit 0 ;;
-  list-sessions) exit 1 ;;
+  list-sessions) printf '%s\\n' 'permission denied' >&2; exit 1 ;;
   *) exit 1 ;;
 esac
 `,

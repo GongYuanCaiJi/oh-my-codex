@@ -7778,7 +7778,14 @@ case "$1" in
     ;;
   show-option|show-options) echo 'team:team-detached-hud-shutdown' ;;
   kill-pane) : > "${tmuxLogPath}.hud-killed" ;;
-  kill-session) exit 0 ;;
+  kill-session) : > "${tmuxLogPath}.session-killed" ;;
+  list-sessions)
+    if [ -f "${tmuxLogPath}.session-killed" ]; then
+      printf '%s\n' 'no server running on /tmp/tmux-1000/default' >&2
+      exit 1
+    fi
+    echo 'omx-team-team-detached-hud-shutdown'
+    ;;
   *) exit 0 ;;
 esac
 `,
@@ -7804,6 +7811,7 @@ esac
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
           assert.match(tmuxLog, /kill-pane -t %2/);
           assert.match(tmuxLog, /kill-session -t omx-team-team-detached-hud-shutdown/);
+          assert.equal(existsSync(join(cwd, '.omx', 'state', 'team', teamName)), false);
         },
       );
     } finally {

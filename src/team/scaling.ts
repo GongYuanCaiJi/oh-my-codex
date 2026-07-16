@@ -10,7 +10,7 @@
  * - 'draining' worker status for graceful transitions during scale_down
  */
 
-import { dirname, isAbsolute, join, resolve } from 'path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { mkdir, readFile, realpath, rm, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import {
@@ -1416,8 +1416,22 @@ interface ScaleDownCleanupDebt {
   removed_worker_names?: string[];
 }
 
-function isSameOrInsidePath(path: string, root: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
+interface PathContainmentSemantics {
+  relative(from: string, to: string): string;
+  isAbsolute(path: string): boolean;
+  sep: string;
+}
+
+export function isSameOrInsidePath(
+  path: string,
+  root: string,
+  pathSemantics: PathContainmentSemantics = { relative, isAbsolute, sep },
+): boolean {
+  const relativePath = pathSemantics.relative(root, path);
+  return relativePath === ''
+    || (!pathSemantics.isAbsolute(relativePath)
+      && relativePath !== '..'
+      && !relativePath.startsWith(`..${pathSemantics.sep}`));
 }
 
 async function assertExistingPathParentContained(path: string, root: string): Promise<void> {

@@ -4117,10 +4117,27 @@ export async function killWorkerPanes(
 // Kill an entire detached tmux session only when the caller has already
 // established ownership. Success requires tmux to accept the kill and a fresh
 // session-list proof that the exact base session is absent.
+function parseTeamSessionNames(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(baseSessionName);
+}
+
+function isFinalTmuxServerGone(result: ReturnType<typeof runTmux>): boolean {
+  return !result.ok && /^no server running on .+$/i.test(result.stderr);
+}
+
 export function destroyTeamSession(sessionName: string): boolean {
   const result = runTmux(['kill-session', '-t', sessionName]);
-  const sessions = listTeamSessions();
-  return result.ok && sessions !== null && !sessions.includes(baseSessionName(sessionName));
+  if (!result.ok) return false;
+
+  const sessions = runTmux(['list-sessions', '-F', '#{session_name}']);
+  // Killing tmux's final session also terminates its server. Its documented
+  // no-server response is the only post-kill query failure that proves absence.
+  if (!sessions.ok) return isFinalTmuxServerGone(sessions);
+  return !parseTeamSessionNames(sessions.stdout).includes(baseSessionName(sessionName));
 }
 
 // A failed query is not a successful empty session list. Destructive callers
@@ -4129,11 +4146,7 @@ export function listTeamSessions(): string[] | null {
   const result = runTmux(['list-sessions', '-F', '#{session_name}']);
   if (!result.ok) return null;
 
-  return result.stdout
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map(baseSessionName);
+  return parseTeamSessionNames(result.stdout);
 }
 
 /**
