@@ -56,16 +56,16 @@ Any mismatch blocks release preparation.
 | Collateral/range review | Confirmed the frozen 22-commit range, all 20 merged PRs, classifications, highlights, contributors, and compare link across `CHANGELOG.md`, `docs/release-notes-0.20.2.md`, `RELEASE_BODY.md`, and this record. | Passed locally |
 | Release-scope review | Candidate changes are the four release-collateral files plus six Darwin portability corrections in existing tests: doctor warning paths, resume `stat` portability/UTC, setup hook trust paths and installed-Codex boundary skips, and canonical adapted-role/tracker cwd expectations. Version metadata remains synchronized at `0.20.2`; no dependency, lockfile, workflow, or product-runtime source change is included. | Passed locally |
 | Local quality gates | Passed: `npm run build`, `npm run build:full`, `npm run sync:plugin:check`, `npm run check:no-unused`, `npm run lint`, `npm test` (383 compiled test files), `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `npm run smoke:packed-install`. The packed-install smoke used an isolated `@openai/codex@0.142.5` executable because the workstation default is 0.142.3. | Passed locally |
-| Review | Required Ultragoal cleanup, architecture review, and executor QA/red-team receipts are pending against the final committed candidate tree. | Pending |
-| CI | Record the `dev` and `main` CI run URLs, exact commits, conclusions, and required job results. | Pending |
-| Tag and release | Record the annotated `v0.20.2` tag object/target and GitHub release URL after publication. | Pending |
-| npm publication | Record package version, registry URL, integrity/package-install evidence, and publication result. | Pending |
+| Review | Ultragoal cleanup reported zero blocking findings; Architect review returned architecture/product/code `CLEAR` with `APPROVE`; executor QA/red-team passed against candidate commit `2e666461d4147fa4718691f7b4d9a1a282380f16`, tree `ef2acf5f20327d23742e8b08827b46802c39751c`. | Passed |
+| CI | `dev` CI [29466350446](https://github.com/Yeachan-Heo/oh-my-codex/actions/runs/29466350446) and `main` CI [29466690074](https://github.com/Yeachan-Heo/oh-my-codex/actions/runs/29466690074) completed successfully for exact shipped commit `2e666461d4147fa4718691f7b4d9a1a282380f16`. | Passed |
+| Tag and release | Annotated tag object `4332cc6418430e8cdfc0769bf52e7ecbdfe08afd` peels to shipped commit `2e666461d4147fa4718691f7b4d9a1a282380f16`. Release workflow [29467048353](https://github.com/Yeachan-Heo/oh-my-codex/actions/runs/29467048353) completed all seven native builds, asset publication/verification, packed-install smoke, and npm publication. GitHub release: https://github.com/Yeachan-Heo/oh-my-codex/releases/tag/v0.20.2. | Passed |
+| npm publication | `npm view oh-my-codex@0.20.2` returned version `0.20.2`, tarball `https://registry.npmjs.org/oh-my-codex/-/oh-my-codex-0.20.2.tgz`, and integrity `sha512-f48bqkK3UX4D2VfKimiqVpbYV+rqim7jJM6KDI/+gzpKzLtnwNTyc06whrkWBqlah0Tg87rX5rG8mkPcGzoZGQ==`. | Passed |
 
-No pending status may be interpreted as a pass. A failed gate blocks tag or publication; exceptions require an explicit maintainer decision and must not weaken the release contract.
+All release gates are complete. `main` and `v0.20.2` identify the shipped candidate; `dev` contains that candidate plus the documented `0.20.3` development-base bump.
 
 ## External evidence requirements
 
-For each completed gate, retain an immutable receipt that identifies the frozen commit, command or review performed, timestamp, actor/system, outcome, and stable URL or artifact path where applicable. CI, tag, GitHub release, npm publication, and public-install evidence must be collected only after those events occur; this document intentionally supplies none.
+For each completed gate, the evidence above identifies the frozen commit, command or review, actor/system, outcome, and stable URL or artifact identity. The tag remains immutable; post-publish corrections use normal forward commits.
 
 ## Release notes and contributors
 
